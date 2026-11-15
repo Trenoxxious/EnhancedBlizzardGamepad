@@ -1,0 +1,17 @@
+## Interface: 16001
+## Title: EnhancedBlizzardGamepad
+## Notes: Various Blizzard-like enhancements for gamepad support.
+## Author: Noxxious
+## Version: 0.22.1
+## SavedVariables: EnhancedBlizzardGamepadDB
+## IconTexture: 4254892
+
+Core.lua
+Layouts.lua
+Skin.lua
+Glyphs.lua
+FocusTracker.lua
+Keyboard.lua
+LFG.lua
+Inspector.lua
+Bindings.xml
