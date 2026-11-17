@@ -393,14 +393,25 @@ function Skin.KeyArt(pressed)
     return up
 end
 
-function Skin.StyleKey(b, state)
+-- Action tints for keys outside the keyboard (auction panels): the same key art, coloured by
+-- what pressing it does. Tints multiply the gray key art, so they stay in the key's palette.
+Skin.KeyTints = {
+    confirm = { 0.55, 1.00, 0.45 },  -- commits something: search, post, buy, confirm
+    danger  = { 1.00, 0.45, 0.38 },  -- gives something up: cancel an auction
+    gold    = { 1.00, 0.80, 0.38 },  -- money entry and bids
+}
+
+function Skin.StyleKey(b, state, tint)
+    if type(tint) == "string" then tint = Skin.KeyTints[tint] end
+    b.tint = tint
     if b.templated then
         if state == "selected" then
             b:LockHighlight()
             b.text:SetTextColor(1, 0.82, 0)
         else
             b:UnlockHighlight()
-            if state == "active" then b.text:SetTextColor(0.4, 0.8, 1)
+            if tint then b.text:SetTextColor(tint[1], tint[2], tint[3])
+            elseif state == "active" then b.text:SetTextColor(0.4, 0.8, 1)
             elseif state == "fn" then b.text:SetTextColor(0.85, 0.85, 0.85)
             else b.text:SetTextColor(1, 1, 1) end
         end
@@ -430,7 +441,8 @@ function Skin.StyleKey(b, state)
         end
         layout(b.artParts[1], b.artParts[2], b.artParts[3])
         local tr, tg, tb = 1, 1, 1
-        if state == "active" then tr, tg, tb = 1, 0.78, 0.35 elseif state == "fn" then tr, tg, tb = 1, 0.95, 0.85 end
+        if tint then tr, tg, tb = tint[1], tint[2], tint[3]
+        elseif state == "active" then tr, tg, tb = 1, 0.78, 0.35 elseif state == "fn" then tr, tg, tb = 1, 0.95, 0.85 end
         for _, t in ipairs(b.artParts) do t:SetVertexColor(tr, tg, tb) end
         b:SetBackdropColor(0, 0, 0, 0)
         b:SetBackdropBorderColor(0, 0, 0, 0)
@@ -458,9 +470,15 @@ function Skin.StyleKey(b, state)
     end
     if b.sheen then b.sheen:Show() end
     if b.lip then b.lip:Show() b.shadow:Show() end
-    b:SetBackdropColor(unpack(c.fill))
-    b:SetBackdropBorderColor(unpack(c.border))
-    b.text:SetTextColor(unpack(c.text))
+    if tint and state ~= "selected" then
+        b:SetBackdropColor(tint[1] * 0.28, tint[2] * 0.28, tint[3] * 0.28, 0.97)
+        b:SetBackdropBorderColor(tint[1] * 0.75, tint[2] * 0.75, tint[3] * 0.75, 1)
+        b.text:SetTextColor(math.min(1, tint[1] + 0.2), math.min(1, tint[2] + 0.2), math.min(1, tint[3] + 0.2))
+    else
+        b:SetBackdropColor(unpack(c.fill))
+        b:SetBackdropBorderColor(unpack(c.border))
+        b.text:SetTextColor(unpack(c.text))
+    end
     if b.sheen then
         if state == "selected" then SetSheen(b.sheen, 0.30, 0.0) else SetSheen(b.sheen, 0.10, 0.0) end
     end
@@ -469,10 +487,10 @@ end
 function Skin.FlashKey(b)
     if b.artParts and Skin.KeyArt() then
         b.pressed = true
-        Skin.StyleKey(b, b.state or "normal")
+        Skin.StyleKey(b, b.state or "normal", b.tint)
         C_Timer.After(0.09, function()
             b.pressed = nil
-            Skin.StyleKey(b, b.state or "normal")
+            Skin.StyleKey(b, b.state or "normal", b.tint)
         end)
         return
     end

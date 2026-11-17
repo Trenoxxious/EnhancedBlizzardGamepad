@@ -128,9 +128,25 @@ local function SetupChatBoxes()
     ns.ApplyChatBoxVisibility()
 end
 
+-- From addon load until a few seconds after each loading screen, automatic opening is held off
+-- (see ns.OnTargetFocused). A manual open (key binding, /ebg kb) still works.
+ns.loadingQuiet = true
+local quietToken = 0
+local function QuietFor(seconds)
+    quietToken = quietToken + 1
+    local token = quietToken
+    ns.loadingQuiet = true
+    C_Timer.After(seconds, function() if token == quietToken then ns.loadingQuiet = false end end)
+end
 local setup = CreateFrame("Frame")
 setup:RegisterEvent("PLAYER_LOGIN")
-setup:SetScript("OnEvent", function() SetupChatBoxes() end)
+setup:RegisterEvent("PLAYER_ENTERING_WORLD")
+setup:RegisterEvent("LOADING_SCREEN_ENABLED")
+setup:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_LOGIN" then SetupChatBoxes()
+    elseif event == "LOADING_SCREEN_ENABLED" then ns.loadingQuiet = true quietToken = quietToken + 1
+    else QuietFor(3) end
+end)
 
 -- Tabs (channel selector and chat window tabs) use the same button art as the keys.
 local function CreateTab(parent, height, onClick)
@@ -625,8 +641,10 @@ end
 
 frame.tabs:RegisterEvent("GROUP_ROSTER_UPDATE")
 frame.tabs:RegisterEvent("PLAYER_GUILD_UPDATE")
+frame.tabs:RegisterEvent("BAG_UPDATE_DELAYED")
 pcall(frame.tabs.RegisterEvent, frame.tabs, "CHANNEL_UI_UPDATE")
-frame.tabs:SetScript("OnEvent", function()
+frame.tabs:SetScript("OnEvent", function(_, event)
+    if event == "BAG_UPDATE_DELAYED" and KB.page ~= "items" then return end
     if frame:IsShown() and not KB.closing then KB:Build() end
 end)
 
@@ -661,6 +679,7 @@ local LEGEND_QUESTS = {
 }
 local function LegendItems(isChat, page)
     if page == "quests" then return LEGEND_QUESTS end
+    if page == "items" then return { { "PAD1", "Link item" }, { "PADLSHOULDER", "Page", "PADRSHOULDER" }, { "PAD2", "Back" } } end
     local items = {}
     for i, v in ipairs(LEGEND_BASE) do items[i] = v end
     if isChat then items[#items + 1] = { "PADBACK", "Channel" } end
@@ -737,6 +756,7 @@ function KB:CurrentRows()
     if self.page == "symbols" then return ns.SymbolRows end
     if self.page == "accents" then return ns.AccentRows(layout) end
     if self.page == "quests" then return self:QuestRows() end
+    if self.page == "items" then return self:ItemRows() end
     local box = self.target
     if box and not box:IsForbidden() and ns.IsChatBox(box) then return layout.rows end
     self.plainRows = self.plainRows or {}
@@ -759,7 +779,49 @@ function KB:CurrentRows()
         end
         self.plainRows[layout.id] = cached
     end
+    if ns.Input.IsSearch(box) then
+        local rows = {}
+        for i, row in ipairs(cached) do rows[i] = row end
+        rows[#rows + 1] = { h = 28, { label = "Clear item filter", w = 12, action = "clearsearch" } }
+        return rows
+    end
     return cached
+end
+
+-- The inventory model also feeds the auction price-lookup tab.
+function KB:ItemRows()
+    local items = ns.Inventory.Read()
+    self.itemPages = math.max(1, math.ceil(#items / 8))
+    self.itemPage = math.max(1, math.min(self.itemPage or 1, self.itemPages))
+    local rows = {}
+    for i = (self.itemPage - 1) * 8 + 1, math.min(#items, self.itemPage * 8) do
+        local item = items[i]
+        rows[#rows + 1] = { h = 32, gap = 4,
+            { label = item.name .. (item.count > 1 and ("  x" .. item.count) or ""), w = 12,
+                action = "itemlink", link = item.link, texture = item.icon, color = ns.Inventory.Color(item.quality), small = true } }
+    end
+    if #rows == 0 then rows[1] = { { label = "No carried items to link", w = 12, action = "letters" } } end
+    rows[#rows + 1] = {
+        { label = "Prev", w = 3, action = "itemprev", pad = "PADLSHOULDER" },
+        { label = "Back", w = 6, action = "letters", pad = "PAD2" },
+        { label = "Next", w = 3, action = "itemnext", pad = "PADRSHOULDER" },
+    }
+    return rows
+end
+
+local itemTooltip
+function KB:RefreshItemTooltip()
+    if self.page ~= "items" then if itemTooltip then itemTooltip:Hide() end return end
+    local b = self.grid[self.sel[1]] and self.grid[self.sel[1]][self.sel[2]]
+    local link = b and type(b.key) == "table" and b.key.link
+    if not link then if itemTooltip then itemTooltip:Hide() end return end
+    itemTooltip = itemTooltip or CreateFrame("GameTooltip", "EBGItemLinkTooltip", frame, "GameTooltipTemplate")
+    itemTooltip:SetOwner(frame, "ANCHOR_NONE")
+    itemTooltip:ClearAllPoints()
+    itemTooltip:SetPoint("BOTTOMLEFT", frame, "BOTTOMRIGHT", 8, 0)
+    itemTooltip:SetClampedToScreen(true)
+    itemTooltip:SetHyperlink(link)
+    itemTooltip:Show()
 end
 
 -- Quest link picker ---------------------------------------------------------------
@@ -1146,7 +1208,12 @@ function KB:RefreshKeys()
             if type(key) == "table" then
                 label, fn = key.label, true
                 -- While picking a whisper target, Send moves on to writing the message.
-                if key.action == "submit" and self.whisperPending then label = "Next" end
+                if key.action == "submit" then
+                    local target = self.target
+                    label = self.whisperPending and "Next" or
+                        (target and target.isEBGInput and target.submitLabel) or
+                        (target and ns.IsChatBox(target) and "Send") or "Done"
+                end
             elseif upper then
                 label = ns.Upper(key)
             end
@@ -1188,11 +1255,27 @@ function KB:RefreshKeys()
                 b.text:SetTextColor(cr, cg, cb)
             end
             KB:SetKeyGlyph(b, fn and key.pad or nil)
+            b.text:SetWidth(fn and (key.texture or key.small) and math.max(1, b:GetWidth() - (key.texture and 52 or 16)) or 0)
+            b.text:SetWordWrap(false)
+            if fn and key.texture then
+                if not b.itemIcon then b.itemIcon = b:CreateTexture(nil, "OVERLAY") end
+                b.itemIcon:SetSize(24, 24)
+                b.itemIcon:SetPoint("LEFT", 8, 0)
+                b.itemIcon:SetTexture(key.texture)
+                b.itemIcon:Show()
+                b.text:ClearAllPoints()
+                b.text:SetPoint("LEFT", 40, 0)
+                b.text:SetJustifyH("LEFT")
+            else
+                if b.itemIcon then b.itemIcon:Hide() end
+                b.text:SetJustifyH("CENTER")
+            end
             local glow = ns.Skin.SelectionGlow(b)
             if glow then glow:SetShown(selected) elseif b.glow then b.glow:Hide() end
         end
     end
     self:RefreshQuestPane()
+    self:RefreshItemTooltip()
 end
 
 function KB:RefreshHeader()
@@ -1202,7 +1285,10 @@ function KB:RefreshHeader()
     local pageName = ""
     if self.page == "quests" then
         pageName = ("Link a quest  %d/%d"):format(self.questPage or 1, self.questPages or 1)
+    elseif self.page == "items" then
+        pageName = ("Link an item  %d/%d"):format(self.itemPage or 1, self.itemPages or 1)
     end
+    if self.target and ns.Input.IsSearch(self.target) then frame.title:SetText("Searching " .. (ns.Input.Context(self.target) or "items")) end
     frame.layoutName:SetText(pageName)
 end
 
@@ -1336,57 +1422,17 @@ end
 -- Writing into the bag search box runs Blizzard's bag filter code as addon code, which taints
 -- gamepad state and later blocks SetPreferredGamepadInteractTarget. For these boxes the text is
 -- kept in-addon and the item filter is set through the container API; the real text box is not touched - Important
-local function IsItemSearchBox(box)
-    if ns.db and ns.db.directBagSearch == false then return false end
-    if not (C_Container and C_Container.SetItemSearch) then return false end
-    local f = box
-    for _ = 1, 8 do
-        if not f or (f.IsForbidden and f:IsForbidden()) then break end
-        local name = (f.GetName and f:GetName()) or (f.GetDebugName and f:GetDebugName()) or ""
-        if name:find("BagItemSearch") or name:find("BankItemSearch") or name:find("ContainerFrame")
-            or name:find("^Bag") or name:find("BankFrame") or name:find("BankPanel") then
-            return true
-        end
-        f = f.GetParent and f:GetParent()
-    end
-    return false
-end
-ns.IsItemSearchBox = IsItemSearchBox
-
-local proxies = setmetatable({}, { __mode = "k" })
-local Proxy = {}
-Proxy.__index = Proxy
-function Proxy:IsForbidden() return false end
-function Proxy:GetText() return self.text end
-function Proxy:GetCursorPosition() return self.pos end
-function Proxy:SetCursorPosition(p) self.pos = math.max(0, math.min(p, #self.text)) end
-function Proxy:Apply() pcall(C_Container.SetItemSearch, self.text) end
-function Proxy:SetText(t)
-    self.text, self.pos = t, #t
-    self:Apply()
-end
-function Proxy:Insert(str)
-    self.text = self.text:sub(1, self.pos) .. str .. self.text:sub(self.pos + 1)
-    self.pos = self.pos + #str
-    self:Apply()
-end
-
+ns.IsItemSearchBox = ns.Input.IsSearch
 TextTarget = function(self)
     local box = Target(self)
-    if not box or not IsItemSearchBox(box) then return box end
-    local p = proxies[box]
-    if not p then
-        local text = box:GetText() or ""
-        p = setmetatable({ text = text, pos = #text }, Proxy)
-        proxies[box] = p
-    end
-    return p
+    if not ns.Input.Allows(box) then return nil end
+    return ns.Input.IsSearch(box) and ns.Input.SearchTarget(box) or box
 end
 
 function KB:Insert(s)
     local box = TextTarget(self)
     if not box then return end
-    if box == self.target and not box.isComposer then ns.NoteWrite(box, "Insert") end
+    if box == self.target and not box.isComposer and not box.isEBGInput then ns.NoteWrite(box, "Insert") end
     box:Insert(s)
     self:RefreshPreview()
 end
@@ -1402,7 +1448,7 @@ function KB:Backspace()
     for _, sp in ipairs(LinkSpans(text)) do
         if start >= sp[1] and start <= sp[2] then start, stop = sp[1], math.max(pos, sp[2]) break end
     end
-    if box == self.target and not box.isComposer then ns.NoteWrite(box, "SetText (backspace)") end
+    if box == self.target and not box.isComposer and not box.isEBGInput then ns.NoteWrite(box, "SetText (backspace)") end
     box:SetText(text:sub(1, start - 1) .. text:sub(stop + 1))
     box:SetCursorPosition(start - 1)
     self:RefreshPreview()
@@ -1416,7 +1462,7 @@ function KB:DeleteWord()
     if pos <= 0 then return end
     local head = text:sub(1, pos)
     local cut = head:match("^(.-)%s*%S+%s*$") or ""
-    if box == self.target and not box.isComposer then ns.NoteWrite(box, "SetText (delete word)") end
+    if box == self.target and not box.isComposer and not box.isEBGInput then ns.NoteWrite(box, "SetText (delete word)") end
     box:SetText(cut .. text:sub(pos + 1))
     box:SetCursorPosition(#cut)
     self:RefreshPreview()
@@ -1452,6 +1498,12 @@ end
 function KB:Submit()
     local box = Target(self)
     if not box then return end
+    if box.isEBGInput then
+        local text, submit = box:GetText(), box.submit
+        ns.HideKeyboard()
+        if submit then submit(text) end
+        return
+    end
     if ns.IsChatBox(box) and self.whisperPending then
         local name = (box:GetText() or ""):gsub("^%s+", ""):gsub("%s+$", "")
         if name ~= "" then
@@ -1483,12 +1535,6 @@ function KB:Submit()
         if self.detached or not box:HasFocus() then ns.HideKeyboard() end
         return
     end
-    if ns.db and ns.db.submitEnter then
-        local handler = box:GetScript("OnEnterPressed")
-        if handler then handler(box) elseif box.OnEnterPressed then box:OnEnterPressed() end
-        self:RefreshPreview()
-        return
-    end
     ns.DismissKeyboard()
 end
 
@@ -1511,6 +1557,29 @@ function ACTIONS.caretleft(self) self:MoveCaret(-1) end
 function ACTIONS.caretright(self) self:MoveCaret(1) end
 function ACTIONS.deleteword(self) self:DeleteWord() end
 function ACTIONS.submit(self) self:Submit() end
+function ACTIONS.clearsearch(self)
+    if ns.Input.IsSearch(self.target) then ns.Input.SetSearch("") self:RefreshPreview() end
+end
+function ACTIONS.items(self)
+    if not self.target or not ns.IsChatBox(self.target) then return end
+    self.page, self.itemPage, self.sel = "items", 1, { 1, 1 }
+    self:Build()
+end
+function ACTIONS.itemprev(self)
+    self.itemPage = ((self.itemPage or 1) - 2) % (self.itemPages or 1) + 1
+    self.sel = { 1, 1 }
+    self:Build()
+end
+function ACTIONS.itemnext(self)
+    self.itemPage = (self.itemPage or 1) % (self.itemPages or 1) + 1
+    self.sel = { 1, 1 }
+    self:Build()
+end
+function ACTIONS.itemlink(self, key)
+    if not key or not key.link or not self.target or not ns.IsChatBox(self.target) then return end
+    self:Insert(key.link .. " ")
+    self:SetPage("letters")
+end
 -- Cancel: an abandoned chat message is discarded, other fields keep their text.
 function ACTIONS.quests(self)
     local box = self.target
@@ -1532,14 +1601,14 @@ function ACTIONS.questlink(self, key)
     local box = self.target
     if not key or not box or box:IsForbidden() then return end
     local link = QuestLink(key.questID, key.title)
-    box:Insert(link .. " ")
+    self:Insert(link .. " ")
     self:SetPage("letters")
     self:RefreshPreview()
 end
 
 function ACTIONS.close(self)
     -- Circle backs out of the quest picker before it closes the keyboard.
-    if self.page == "quests" then self:SetPage("letters") return end
+    if self.page == "quests" or self.page == "items" then self:SetPage("letters") return end
     local box = self.target
     if box and not box:IsForbidden() and ns.IsChatBox(box) then pcall(box.SetText, box, "") end
     ns.DismissKeyboard()
@@ -1678,6 +1747,7 @@ local consumed = {}
 local r2Held, r2Used
 
 frame:SetScript("OnGamePadButtonDown", function(self, button)
+    if InCombatLockdown() then return end
     SetPropagate(self, false)
     consumed[button] = true
     if KB.closing then return end
@@ -1693,7 +1763,7 @@ frame:SetScript("OnGamePadButtonDown", function(self, button)
     end
     local action = BUTTON_ACTIONS[button]
     ns.Debug("pad", button, "->", action or "passthrough")
-    if button == "PAD2" and KB.page ~= "quests" then
+    if button == "PAD2" and KB.page ~= "quests" and KB.page ~= "items" then
         local box = KB.target
         if box and not box:IsForbidden() and ns.IsChatBox(box) and not box.isComposer then
             -- Empty the message, then let Blizzard see this Circle press and close chat itself.
@@ -1713,6 +1783,8 @@ frame:SetScript("OnGamePadButtonDown", function(self, button)
     if KB.page == "quests" then
         -- In the quest picker the bumpers turn pages instead of moving the text caret.
         if action == "caretleft" then action = "questprev" elseif action == "caretright" then action = "questnext" end
+    elseif KB.page == "items" then
+        if action == "caretleft" then action = "itemprev" elseif action == "caretright" then action = "itemnext" end
     end
     KB:RunAction(action)
     if REPEATABLE[action] then
@@ -1721,6 +1793,7 @@ frame:SetScript("OnGamePadButtonDown", function(self, button)
 end)
 
 frame:SetScript("OnGamePadButtonUp", function(self, button)
+    if InCombatLockdown() then return end
     local mine = consumed[button]
     consumed[button] = nil
     SetPropagate(self, not mine)
@@ -1740,6 +1813,7 @@ end
 
 local mirrorDir, mirrorNext
 frame:SetScript("OnGamePadStick", function(self, stick, x, y, len)
+    if InCombatLockdown() then return end
     -- Right stick scrolls the chat copy while it is up; the left stick always stays with movement.
     if stick == "Right" and ns.ChatMirrorScrollable() then
         SetPropagate(self, false)
@@ -1848,7 +1922,15 @@ local function Capture(on)
 end
 
 function ns.OnCombatEnd()
-    if frame:IsShown() and KB.combatLocked then Capture(true) end
+    Capture(frame:IsShown() and not KB.closing)
+end
+
+function ns.OnCombatStart()
+    held, stickDir, rstickDir, mirrorDir = nil, nil, nil, nil
+    r2Held = false
+    wipe(consumed)
+    KB.combatLocked = frame:IsShown()
+    frame.combat:SetShown(frame:IsShown())
 end
 
 -- Show / hide ------------------------------------------------------------------------
@@ -1930,6 +2012,10 @@ function ns.ShowKeyboard(manual, forced)
         if manual then ns.Print("No text field is focused. Open chat or select a text field first.") end
         return
     end
+    if not ns.Input.Allows(box) then
+        ns.Print("This native field is not enabled for EBG typing. For auction search use /ebg ah.")
+        return
+    end
     ns.dismissedBox = nil
     KB:SetTarget(box)
     if not frame:IsShown() then
@@ -1942,10 +2028,8 @@ function ns.ShowKeyboard(manual, forced)
     end
 end
 
--- Blizzard's persistent legend shows L2/R2 as Previous/Next Frame, which conflicts with
--- Shift/Send here, so it is faded out while the keyboard is open.
--- Blizzard's gamepad focus pointer would otherwise point at the faded-out edit box. The same
--- pointer is used all over the game, so its alpha values are saved and put back on close.
+-- Preserve the established pointer parking behavior; it has been exercised on
+-- Forever. Text/focus isolation is handled independently by TextSafety.lua.
 local pointerActive, pointerPoints, pointerAlpha
 local function PointerRegions()
     local nav = _G.SmartNavigation
@@ -2022,6 +2106,7 @@ function ns.PointerDiagnostics()
     return ok and text or ("unreadable: " .. tostring(text))
 end
 
+
 function ns.SetNativeLegendHidden(hidden)
     if ns.db and ns.db.hideNativeLegend == false then return end
     local legend = _G.GamepadPersistentInputLegend
@@ -2039,6 +2124,7 @@ function KB:FinishClose()
     frame:Hide()
     self.target = nil
     self.detached = false
+    if ns.Auction and ns.Auction.ResumeInput then ns.Auction.ResumeInput() end
     ns.SetNativeLegendHidden(false)
     ns.SetNavPointerHidden(false)
     ns.ApplyChatBoxVisibility()
@@ -2095,6 +2181,11 @@ local function SafeOpen(fn, ...)
 end
 
 function ns.OnTargetFocused(box)
+    if KB.target and KB.target.isEBGInput and frame:IsShown() then return end
+    if not ns.Input.Allows(box) then
+        ns.HideKeyboard()
+        return
+    end
     if frame:IsShown() then
         SafeOpen(KB.SetTarget, KB, box)
         return
@@ -2102,6 +2193,9 @@ function ns.OnTargetFocused(box)
     local db = ns.db
     if not db or not db.enabled or not db.autoShow then return end
     if db.requirePad and not ns.IsGamepadActive() then return end
+    -- A field focused while the game is loading (login, reload, loading screens) was not chosen by
+    -- the player, so the keyboard never opens by itself then.
+    if ns.loadingQuiet then return end
     SafeOpen(ns.ShowKeyboard, false)
     ns.ApplyChatBoxVisibility()
 end
@@ -2111,6 +2205,7 @@ end
 -- closes on Send, Close or when another field takes focus.
 function ns.OnTargetLost()
     local box = KB.target
+    if box and box.isEBGInput then return end
     local justSent = KB.submittedAt and GetTime() - KB.submittedAt < 0.5
     if not justSent and frame:IsShown() and not KB.closing and box and not box:IsForbidden() and frame:IsMouseOver() then
         KB.detached = true

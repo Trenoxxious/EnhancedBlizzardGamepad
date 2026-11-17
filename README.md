@@ -48,7 +48,8 @@ Mouse clicks on keys also work, which is the fallback in combat.
 - `check <names>` tells you whether atlas names exist on this build
 - `glyphs` prints which controller atlas resolved for every pad button and which native templates are in use
 - `prompts` toggles building the legend from Blizzard's own `GamepadPersistentInputLegendEntryTemplate` (default on)
-- `enter` makes Send run a non-chat field's own Enter action again (off by default: Send keeps the text and closes the keyboard, which avoids running Blizzard code as addon code)
+- `ah` opens the gamepad auction browser while visiting an auctioneer; `ah auto` toggles automatic opening with a gamepad
+- `enter` explains the retired Enter-handler option. Native Enter handlers are never executed by EBG; Done keeps text and closes the keyboard
 - `chatbox` toggles fading the real chat edit box while the keyboard is typing into it (default on, so the preview strip is the only visible input)
 - `legend` toggles fading Blizzard's persistent gamepad legend while the keyboard is open (default on, since its L2/R2 hints conflict with Shift/Send)
 - `probe [FrameName]` lists the mixin functions and fields on a frame; with no name it probes Blizzard's own gamepad InputIcon, which shows the API the native legend uses to pick button art
@@ -68,9 +69,139 @@ the keyboard away and leave the field focused. `/ebg show` reopens the keyboard 
 is still focused.
 
 Bag and bank search are a second case: writing into that search box runs Blizzard's bag filter
-as addon code and causes the same block. For those boxes the addon keeps the typed text itself
-and sets the filter with `C_Container.SetItemSearch`; the real search box is never written to, so
-it does not show the text. `/ebg bagsearch` turns this off.
+as addon code and can cause the same block. EBG keeps the query in one shared buffer and calls
+`C_Container.SetItemSearch`; it never writes to the real search box. A separate Item filter strip
+shows the active query and a Clear button; Clear item filter is also reachable on the keyboard.
+A post-hook observes native filter changes, including clearing, so cached text cannot overwrite
+a newer native search. API failures retain the last successfully applied query and report an error.
+`/ebg bagsearch` can no longer disable this protection, including through older saved settings.
+
+Only named item-search fields and actual SearchBox/SearchBar children in bag/bank contexts use
+the filter. Other native bank/guild-bank fields and native auction fields are excluded from EBG
+typing until a dedicated adapter is validated; use their native controls. Auction search uses an
+addon-owned buffer instead. There is no native Enter-handler escape hatch.
+
+The established native arrow parking and legend fading are preserved. `/ebg pointer move|hide|off`
+still controls the arrow. These visual behaviors are separate from the text-entry protections.
+
+## Gamepad auction browser (0.23.1)
+
+Visit an auctioneer with a gamepad, or run `/ebg ah`. `/ebg ah auto` toggles automatic opening.
+The browser, its launcher button and `/ebg ah` are only available while the gamepad interface is
+enabled; switching it off closes the browser. While the browser is open Blizzard's auction window
+is faded to alpha 0 (it must stay open to keep the auction session) and restored on close;
+`/ebg ah native` toggles that fade. While open, the browser keeps every pad button except the
+system buttons (Menu, View, Social, System) so none can act on the faded window; Blizzard's
+navigation pointer is faded with it. Entering combat closes the browser, because pad input cannot
+be withheld from the game in combat.
+The browser retains the metal frame and native glyphs, with auction-specific styling:
+red native primary buttons, an inset search field, bottom view tabs, compact category rows,
+and a striped results table. Categories, results, and item previews have separate backgrounds.
+An amber marker identifies the applied category; a thin gold outline identifies controller
+focus. These states remain independent when moving from the category tree into results.
+Its Buy view keeps a category column on the left, search/filter controls at the top, and
+Price / Name / Available result columns. Available is shown before selecting an item and comes
+from the auction API's totalQuantity. Legacy listings use a clearly labeled Stack column instead
+of claiming that a partial server page represents total market supply.
+
+Categories are copied from Forever's native AuctionCategories data, preserving localized names,
+order, subcategories, equipment slots, and their query filters. EBG stores expansion and selection
+only in its own tables. A basic nine-category fallback is used if native data is unavailable.
+Once a category is picked the list shows only its path and its subcategories; a Back button
+under the list steps up one level. Selecting a category does not query the auction house: it clears the old results and waits for
+Search, so several category steps cost one request instead of one each.
+Sorting is done from the results' column headers, as in Blizzard's window: press Price, Name, or
+(for gear) Level to sort by it, and again to reverse; the current search re-runs in the new order.
+Filter opens a single page: the level range at the top, then checkboxes grouped as in Blizzard's
+filter menu (general options; rarities in their quality colours). The Filter button shows how many
+settings differ from the defaults. Apply and search submits these through the auction query API;
+no native search handler or category mixin is called. Any (zero) means no level limit.
+
+Views: Buy (search, inspect, buy out or bid), Sell (auctionable bag items), Recent
+(eight recent search strings), Auctions (review and cancel your listings). Modern item selection loads
+individual auction/commodity rows. Native window closes the overlay without closing the auctioneer.
+A launcher button and `/ebg ah` reopen it.
+
+### Buying and selling (0.24)
+
+The transaction panel follows Blizzard's Post Auctions layout: the form on the left, current
+listings or details on the right. Every value is on screen and edited in place (one key each for
+gold, silver, and copper; duration is three one-press choices). The main action starts focused
+and Y performs it from anywhere; B goes back. Buttons are keyboard keys coloured by action:
+green commits (Search, Create Auction, Buyout, Confirm), red gives something up (Cancel
+Auction), gold enters money or bids, gray navigates.
+
+Select a listing, then Buyout or Bid (the bid starts at the minimum). Commodities accept a quantity
+(Max fills what is listed), request a live server quote, then show its actual total for confirmation.
+Expired quotes cannot be accepted. Purchase confirmations start with Back selected, so a doubled A
+press never buys; Y confirms. An updated quote resets selection and invalidates any held confirm
+press. Item transactions recheck the auction ID, item, quantity, price, and funds.
+
+Sell lists unlocked, auctionable items. Choosing one opens the form with the price already set to
+the lowest current buyout, commodities at their full bag quantity, and the last duration used, so
+posting at market price is: choose the item, press A on Create Auction. Picking a row in the
+listings column copies its price. A price edited while the lookup is pending is preserved; if
+nothing is listed, enter a price. Deposit and total update live. Create Auction validates and posts
+in one press, as Blizzard's does. Item identity, quantity, deposit, and funds are checked on posting.
+The posting API's additional confirmation requirement is honored with a second warning and
+`ConfirmPostItem` / `ConfirmPostCommodity`; it is never automatically accepted. EBG dismisses
+the stock posting notification for its own request because that popup accepts the stock sell
+frame's pending post, not EBG's. Native popup definitions and scripts remain untouched.
+
+Posting, buying, bidding and cancelling are only allowed inside a hardware input event, and a raw
+gamepad button script is not one (calling `PostCommodity` from it is blocked as `UNKNOWN()`). While
+the transaction panel is open, A, B and Y are therefore temporary override bindings that click
+hidden EBG buttons; the browser lets those three presses through to them. The bindings are
+removed when the panel closes, while the on-screen keyboard is open, and are never changed in combat.
+
+Select an owned auction to see its cancellation fee; the form starts on Back, and Y (or A on Cancel Auction) cancels in one press. Confirmed operations wait for matching
+server acknowledgements, handle errors and multisell progress, and never automatically retry.
+An unknown outcome tells the player to check auctions, bags, and mail before trying again.
+Another window's query or transaction invalidates a pending purchase instead of reusing stale
+listing or quote state. Closing the auctioneer or entering combat dismisses the transaction UI.
+Search/price keyboard dismissal synchronously restores browser input capture.
+
+Transactions target Forever's modern `C_AuctionHouse` API. Legacy browsing remains available,
+but legacy transactions still require the native window. No real purchases or sales are made by
+the offline test suite; live secure-execution and visual checks remain required.
+
+| Control | Action |
+|---|---|
+| D-pad up/down | Move selection |
+| D-pad left/right | Move between categories and results, or adjacent controls |
+| Cross / A | Activate selection (on release) |
+| Circle / B | Back from filters/listings; otherwise close overlay |
+| Square / X | Enter search using EBG's keyboard |
+| Triangle / Y | Search again / refresh current view |
+| L1 / R1 (LB / RB) | Change view |
+| L2 / R2 (LT / RT) | Previous / next results page |
+
+Requests respect server throttling and allow one pending query. Changing a query in another
+window invalidates the displayed results. Timeouts and API errors produce visible recovery
+messages. Closing the auctioneer also closes its composer and overlay. Combat disables actions;
+capture is reconciled after combat even if the window closed during lockdown.
+
+Implementation: AuctionFilters.lua owns category/filter snapshots, AuctionData.lua owns API
+queries and result normalization, AuctionHouse.lua owns the controller frame. AuctionTransactions.lua
+owns transaction validation and API state; AuctionTradeUI.lua owns the controller confirmation panel.
+Modern and legacy APIs are detected independently.
+
+The breadcrumb displays the full applied category path. Browse, listings, filters, selling,
+recent searches, and owned auctions each have a distinct heading and explanatory text. Listings
+and filters expose an explicit Back control. Category controls appear only while browsing;
+other views explain what their rows represent. Up from the first result returns to the search
+toolbar, left/right moves between results and categories, and category navigation advances its
+page when reaching the end. The item preview pane shows the item's own tooltip, scaled down when
+needed to fit the pane, with price and quantity beneath it. Prices use the gold, silver and copper
+coin icons. AuctionStyle.lua owns this visual language independently
+of the keyboard's key art.
+
+## Item link picker
+
+The chat keyboard's Items button opens a read-only list of carried items with icons, rarity color,
+combined counts for identical links, and an item tooltip. Cross/A inserts the exact link and
+returns to typing. L1/R1 changes pages; Circle/B returns without clearing the message. Bag updates
+refresh the picker. It never picks up, equips, moves, or sells an item.
 
 ## Group browser whisper
 
@@ -136,6 +267,44 @@ so those clients fall back to QWERTY.
 
 1. `/ebg status` with a pad connected: `active=true` and `glyphs` matching your controller.
 2. Open chat with the pad, confirm the keyboard appears and the native bindings do not fire while typing.
-3. AH search, mail body, profession search, transmog search: header names the screen, Start submits.
+3. Mail/profession/transmog text entry: header names the screen; Done keeps text and closes EBG. Submit using the native control.
 4. Enter combat with the keyboard open: combat badge appears, mouse still works, pad resumes after combat.
 5. If `GAME_PAD_ACTIVE_CHANGED` never fires on this build, `pad off` forces auto popup regardless.
+
+### 0.23 live acceptance pass (not yet completed)
+
+- The gamepad auction browser covers the native auction window, including its bottom tabs,
+  and follows its position and scale. Its background intercepts mouse clicks. Verify the edges
+  at your UI scale and after moving the native window; native window geometry is read only.
+- From a clean `/reload`, search bags, clear, type with a physical keyboard in the native field,
+  reopen EBG, switch to bank, and clear again. Verify the item filter strip and actual results agree.
+- Exercise bag/bank item movement, splitting, deposits/withdrawals, sorting, closing/reopening,
+  and subsequent gamepad navigation. Check `/ebg blocked`; collect the client's taint log if blocked.
+- Search auctions by name and category; expand Weapons and Armor into nested categories/slots.
+  Verify filters/levels/sort and Available counts against the native frame. Inspect commodity and
+  equipment listings, page results, use Sell/Recent/Auctions, and return to native controls.
+- Buy one inexpensive item and a small commodity quantity, place a bid, post an item and a
+  commodity, and cancel an owned auction. Check prices, deposits, confirmations, success/error
+  messages, and mail. Exercise posting warnings, quote expiry, and inventory changes during review.
+  Confirm no blocked actions or stale queries. Native queries should invalidate EBG's old results.
+- Enter/leave combat and close either window during combat; test held-button release, keyboard
+  submit/cancel, and mouse/controller switching. Verify the arrow restores its original anchor.
+- Repeat with EBG alone, then the normal addon set. A clean blocked-action list alone does not
+  establish absence of taint; live secure-execution behavior cannot be modeled by unit tests.
+
+### Offline regression checks
+
+`python tests/run.py [directory containing lupa]` uses lupa's Lua 5.1 runtime. It parses every
+addon Lua file and exercises search isolation/synchronization, API failure, combat guards, item
+links, owned composers, auction throttling/timeouts/paging, availability labels, category copying,
+query filters, external-query invalidation, and arrow restoration using a small mock host.
+Transaction checks cover explicit confirmation, live quotes, price changes, expired quotes,
+funds, inventory identity, deposits, posting warnings, multisell, cancellation, server errors,
+duplicate submission, external transaction interference, and synchronous input handoff.
+These checks do not render WoW or certify taint-free operation.
+
+API reference: [Forever auction category data](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_AuctionHouseUI/Camelot/Blizzard_AuctionData.lua),
+[Forever search bar](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_AuctionHouseUI/Shared/Blizzard_AuctionHouseSearchBar.lua).
+Transaction references: [Forever auction API](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/AuctionHouseDocumentation.lua),
+[commodity confirmation](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_AuctionHouseUI/Shared/Blizzard_AuctionHouseBuyDialog.lua),
+[item posting confirmation](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_AuctionHouseUI/Shared/Blizzard_AuctionHouseItemSellFrame.lua).

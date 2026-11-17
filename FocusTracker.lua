@@ -67,6 +67,7 @@ local function ChatDescription(box)
 end
 
 function ns.IsChatBox(box)
+    if box.isEBGInput then return false end
     if box.isComposer then return true end
     if ChatEdit_GetActiveWindow and ChatEdit_GetActiveWindow() == box then return true end
     local name = box:GetName()
@@ -74,6 +75,7 @@ function ns.IsChatBox(box)
 end
 
 function ns.DescribeTarget(box)
+    if box and box.isEBGInput then return box.title end
     if not IsUsable(box) then return "Text field" end
     if ns.IsChatBox(box) then return ChatDescription(box) end
     local f = box

@@ -78,9 +78,11 @@ local function PrefixFromNativeLegend()
 end
 
 local cache = { prefix = nil, family = nil, atlases = {} }
+local drawnCache = {} -- see Glyphs.Drawn
 
 function Glyphs.Reset()
-    cache.prefix, cache.family = nil, nil
+    cache.prefix, cache.family, cache.dpad = nil, nil, nil
+    wipe(drawnCache)
     wipe(cache.atlases)
 end
 
@@ -132,9 +134,57 @@ function Glyphs.Text(button)
     return TEXT[family][button] or TEXT_COMMON[button] or button
 end
 
+-- The whole D-pad as one glyph. Some clients have no per-direction D-pad atlases, so this is
+-- also the fallback for a single direction (followed by the direction's name).
+local DPAD = { PADDUP = true, PADDDOWN = true, PADDLEFT = true, PADDRIGHT = true }
+local DPAD_ALL = {
+    PS = { "gamepad-ps-32x-primaryshortcut-dpad-all", "gamepad-ps4-32x-primaryshortcut-dpad-all", "gamepad-ps5-32x-primaryshortcut-dpad-all" },
+    XB = { "gamepad-xb1-32x-primaryshortcut-dpad-all", "gamepad-xbox-32x-primaryshortcut-dpad-all" },
+}
+function Glyphs.DpadAtlas()
+    if cache.dpad ~= nil then return cache.dpad or nil end
+    local family = Glyphs.Family()
+    local found = false
+    for _, list in ipairs({ DPAD_ALL[family] or {}, DPAD_ALL.XB }) do
+        for _, name in ipairs(list) do
+            if AtlasExists(name) then found = name break end
+        end
+        if found then break end
+    end
+    cache.dpad = found
+    return found or nil
+end
+-- The button drawn inside text (an inline atlas), for legends and hints; the name if no atlas exists.
+-- "PADDPAD" means the D-pad as a whole.
+function Glyphs.Inline(button, size)
+    size = size or 18
+    local atlas = button ~= "PADDPAD" and Glyphs.Atlas(button, "Normal")
+    if atlas then return ("|A:%s:%d:%d|a"):format(atlas, size, size) end
+    -- Otherwise use whatever Blizzard's own icon frame draws for this button.
+    local drawn = button ~= "PADDPAD" and Glyphs.Drawn(button)
+    if drawn and drawn.atlas then return ("|A:%s:%d:%d|a"):format(drawn.atlas, size, size) end
+    if drawn and drawn.file then return ("|T%s:%d:%d|t"):format(tostring(drawn.file), size, size) end
+    if button == "PADDPAD" or DPAD[button] then
+        local dpad = Glyphs.DpadAtlas()
+        if dpad then
+            local markup = ("|A:%s:%d:%d|a"):format(dpad, size, size)
+            return button == "PADDPAD" and markup or (markup .. " " .. TEXT_COMMON[button])
+        end
+        if button == "PADDPAD" then return "D-pad" end
+    end
+    return Glyphs.Text(button)
+end
+-- One legend entry: glyphs, then the label. `buttons` may be one button or a list.
+function Glyphs.Legend(buttons, label, size)
+    if type(buttons) ~= "table" then buttons = { buttons } end
+    local parts = {}
+    for i, b in ipairs(buttons) do parts[i] = Glyphs.Inline(b, size) end
+    return table.concat(parts) .. " " .. label
+end
 -- Applies a glyph to a texture; returns true if an atlas was used, false if the caller should show text.
 function Glyphs.Apply(texture, button, state)
-    local atlas = Glyphs.Atlas(button, state)
+    local atlas = button ~= "PADDPAD" and Glyphs.Atlas(button, state)
+    if not atlas and (button == "PADDPAD" or DPAD[button]) then atlas = Glyphs.DpadAtlas() end
     if atlas then
         texture:SetAtlas(atlas, false)
         texture:Show()
@@ -244,6 +294,38 @@ function Glyphs.BindNativeIcon(f, button)
     return ok
 end
 
+-- What Blizzard's own icon frame draws for `button` ({atlas=...} or {file=...}), read from a hidden
+-- probe. Used for glyphs inside text when the atlas names cannot be guessed on this client.
+local probe = nil
+local function FindDrawn(f, depth)
+    if depth > 3 or not f then return nil end
+    for _, r in ipairs({ f:GetRegions() }) do
+        if r.GetObjectType and r:GetObjectType() == "Texture" then
+            local atlas = r.GetAtlas and r:GetAtlas()
+            if atlas and atlas ~= "" then return { atlas = atlas } end
+            local file = r:GetTexture()
+            if file and file ~= "" then
+                local l, t, _, _, _, _, rr, b = r:GetTexCoord()
+                if (l or 0) == 0 and (t or 0) == 0 and (rr or 1) == 1 and (b or 1) == 1 then return { file = file } end
+            end
+        end
+    end
+    for _, c in ipairs({ f:GetChildren() }) do
+        local found = FindDrawn(c, depth + 1)
+        if found then return found end
+    end
+end
+function Glyphs.Drawn(button)
+    if drawnCache[button] ~= nil then return drawnCache[button] or nil end
+    local found = false
+    if probe == nil then probe = Glyphs.CreateNativeIcon(UIParent) or false if probe then probe:Hide() end end
+    if probe and Glyphs.BindNativeIcon(probe, button) then
+        local ok, result = pcall(FindDrawn, probe, 0)
+        found = ok and result or false
+    end
+    drawnCache[button] = found
+    return found or nil
+end
 function Glyphs.MixinReport()
     ScanMixins()
     local lines = {}

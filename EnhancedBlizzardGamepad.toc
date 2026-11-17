@@ -2,7 +2,7 @@
 ## Title: EnhancedBlizzardGamepad
 ## Notes: Various Blizzard-like enhancements for gamepad support.
 ## Author: Noxxious
-## Version: 0.22.1
+## Version: 0.24.0
 ## SavedVariables: EnhancedBlizzardGamepadDB
 ## IconTexture: 4254892
 
@@ -10,8 +10,16 @@ Core.lua
 Layouts.lua
 Skin.lua
 Glyphs.lua
+TextSafety.lua
+Inventory.lua
 FocusTracker.lua
 Keyboard.lua
+AuctionFilters.lua
+AuctionData.lua
+AuctionStyle.lua
+AuctionTransactions.lua
+AuctionTradeUI.lua
+AuctionHouse.lua
 LFG.lua
 Inspector.lua
 Bindings.xml

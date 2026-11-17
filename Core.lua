@@ -18,8 +18,8 @@ local DEFAULTS = {
     bgShade = 0.7,           -- 0 = art at full strength, 1 = solid black
     hideChatBox = true,      -- fade the real chat edit box while the keyboard targets it
     chatMirror = true,       -- show a copy of the chat window above the keyboard while typing in chat
-    hideNavPointer = true,   -- fade SmartNavigation.Pointer.Icon while typing
-    hideNativeLegend = true, -- fade Blizzard's gamepad legend while the keyboard is open
+    hideNavPointer = true,   -- park the native pointer beside the keyboard preview (or hide it)
+    hideNativeLegend = true, -- fade the native legend while EBG shows contextual prompts
     nativePrompts = true,    -- build the legend from Blizzard's prompt entry template
 }
 
@@ -149,8 +149,23 @@ local lastWrite
 function ns.NoteWrite(box, op)
     local ok, chain = pcall(FrameChain, box)
     lastWrite = { chain = ok and chain or "unreadable", op = op, t = GetTime() }
+    if ns.NoteAction then ns.NoteAction(op) end
 end
 
+-- The last few EBG calls into Blizzard code or protected-adjacent APIs, newest last. A blocked
+-- action names UNKNOWN() when the client cannot attribute it, so the trail is what identifies it.
+local trail = {}
+function ns.NoteAction(op)
+    trail[#trail + 1] = { op = op, t = GetTime() }
+    if #trail > 8 then table.remove(trail, 1) end
+end
+-- Modules add a one-line snapshot of their state to every record.
+ns.blockedContext = {}
+local function Trail()
+    local parts, now = {}, GetTime()
+    for i = #trail, 1, -1 do parts[#parts + 1] = ("%s (%.1fs)"):format(trail[i].op, now - trail[i].t) end
+    return #parts > 0 and table.concat(parts, " < ") or "none"
+end
 function ns.RecordBlockedAction(event, addon, func)
     local db = ns.db
     if not db then return end
@@ -166,11 +181,22 @@ function ns.RecordBlockedAction(event, addon, func)
         target = okT and target or "unreadable",
         focus = okF and focus or "unreadable",
         lastWrite = lastWrite and ("%s into %s, %.1fs earlier"):format(lastWrite.op, lastWrite.chain, GetTime() - lastWrite.t) or "none this session",
+        trail = Trail(),
+        combat = InCombatLockdown() and true or false,
     }
+    local context = {}
+    for name, fn in pairs(ns.blockedContext) do
+        local ok, text = pcall(fn)
+        context[#context + 1] = name .. ": " .. (ok and tostring(text) or "unreadable")
+    end
+    entry.context = table.concat(context, "  |  ")
     table.insert(db.blocked, entry)
     while #db.blocked > 30 do table.remove(db.blocked, 1) end
     if tostring(addon) == ADDON then
         ns.Print(("Blocked action recorded: %s (%s). Last write: %s"):format(entry.func, event, entry.lastWrite))
+        ns.Print("Recent EBG calls: " .. entry.trail)
+        if entry.context ~= "" then ns.Print(entry.context) end
+        ns.Print("Full record: /ebg blocked")
     end
 end
 
@@ -303,14 +329,13 @@ local function HandleSlash(msg)
         if ns.RebuildKeyboard then ns.RebuildKeyboard() end
         ns.Print("Entry box art: " .. tostring(db.entryBox or "skin default"))
     elseif cmd == "pointer" then
-        -- /ebg pointer move | hide | off
         if rest == "move" or rest == "hide" or rest == "off" then
             ns.SetNavPointerHidden(false)
             db.hideNavPointer = rest ~= "off"
             if rest ~= "off" then db.navPointer = rest end
             ns.Print("Navigation pointer while typing: " .. rest)
         else
-            ns.Print("Usage: /ebg pointer move (park left of the keyboard), hide, or off")
+            ns.Print("Usage: /ebg pointer move, hide, or off")
         end
     elseif cmd == "mirrorscroll" then
         db.mirrorScroll = db.mirrorScroll == false
@@ -328,12 +353,20 @@ local function HandleSlash(msg)
     elseif cmd == "lfg" then
         db.lfgWhisper = db.lfgWhisper == false
         ns.Print("R2 + Cross whisper in the group browser: " .. (db.lfgWhisper and "on" or "off"))
+    elseif cmd == "ah" then
+        if rest == "auto" then
+            db.auctionAuto = db.auctionAuto == false
+            ns.Print("Open the gamepad auction browser at auctioneers: " .. (db.auctionAuto and "on" or "off"))
+        elseif rest == "native" then
+            db.auctionHideNative = db.auctionHideNative == false
+            ns.Print("Fade Blizzard's auction window while the gamepad browser is open: " .. (db.auctionHideNative and "on" or "off"))
+        elseif ns.Auction then ns.Auction.Open() end
     elseif cmd == "bagsearch" then
-        db.directBagSearch = db.directBagSearch == false
-        ns.Print("Bag search through the item filter instead of the search box: " .. (db.directBagSearch and "on" or "off"))
+        db.directBagSearch = true
+        ns.Print("Bag/bank search always uses the item filter API. Native search fields are never written to.")
     elseif cmd == "enter" then
-        db.submitEnter = not db.submitEnter
-        ns.Print("Send runs the field's Enter action outside chat: " .. (db.submitEnter and "on" or "off (Send just closes the keyboard)"))
+        db.submitEnter = nil
+        ns.Print("Native Enter-handler execution was removed to prevent taint. Done closes the keyboard; auction search uses /ebg ah.")
     elseif cmd == "chatbox" then
         db.hideChatBox = db.hideChatBox == false
         if ns.ApplyChatBoxVisibility then ns.ApplyChatBoxVisibility() end
@@ -407,6 +440,9 @@ local function HandleSlash(msg)
             lines[#lines + 1] = "   keyboard shown: " .. tostring(e.keyboardShown) .. "   target: " .. e.target
             lines[#lines + 1] = "   focus: " .. e.focus
             lines[#lines + 1] = "   last write: " .. e.lastWrite
+            if e.trail then lines[#lines + 1] = "   recent EBG calls (newest first): " .. e.trail end
+            if e.context and e.context ~= "" then lines[#lines + 1] = "   state: " .. e.context end
+            if e.combat ~= nil then lines[#lines + 1] = "   in combat: " .. tostring(e.combat) end
         end
         if #lines == 0 then lines[1] = "No blocked actions recorded." end
         ns.ShowReport("blocked", lines)
@@ -441,7 +477,7 @@ local function HandleSlash(msg)
         lines[#lines + 1] = "Nav pointer: " .. ns.PointerDiagnostics()
         ns.ShowReport("status", lines)
     else
-        ns.Print("Commands: show, hide, toggle, auto [on|off], pad [on|off], layout <id>, scale <0.5-2>, skin <id>, glow <atlas|off>, atlas [FrameName|ui], bg <atlas|default>, shade <0-1>, keyart <up> [down]|off|default, keypad <0-0.4>, keybleed <0-12>, keyglow <0-2>, entrybox <base>|off|default, glyphs, mixins, probe <FrameName>, check <atlas names>, legendart, lfg, bagsearch, enter, legend, chatbox, pointer, mirror, mirrorscroll, fadechat, prompts, sounds, blocked [clear], status")
+        ns.Print("Commands: show, hide, toggle, ah [auto], auto [on|off], pad [on|off], layout <id>, scale <0.5-2>, skin <id>, glow <atlas|off>, atlas [FrameName|ui], bg <atlas|default>, shade <0-1>, keyart <up> [down]|off|default, keypad <0-0.4>, keybleed <0-12>, keyglow <0-2>, entrybox <base>|off|default, glyphs, mixins, probe <FrameName>, check <atlas names>, legendart, lfg, bagsearch, enter, legend, chatbox, pointer, mirror, mirrorscroll, fadechat, prompts, sounds, blocked [clear], status")
     end
 end
 
