@@ -43,23 +43,12 @@ end
 
 -- Gamepad state --------------------------------------------------------------
 
-ns.padActive = false
-
-local function HasDevice()
-    if not C_GamePad or not C_GamePad.IsEnabled then return false end
-    if not C_GamePad.IsEnabled() then return false end
-    if C_GamePad.GetActiveDeviceID then
-        local id = C_GamePad.GetActiveDeviceID()
-        if id == nil or id == -1 then return false end
-    end
-    return true
-end
-
+-- The client reports its input style directly: 1 while the gamepad interface is enabled, 0 otherwise.
 function ns.IsGamepadActive()
-    if not HasDevice() then return false end
-
-    if ns.sawActiveEvent then return ns.padActive end
-    return true
+    local api = C_InputInterfaceStyle
+    if not api or not api.GetCurrentStyle then return false end
+    local ok, style = pcall(api.GetCurrentStyle)
+    return ok and style == 1
 end
 
 -- Blizzard identifies the controller family through labelStyle on the mapped device state
@@ -111,19 +100,15 @@ f:SetScript("OnEvent", function(self, event, ...)
             EnhancedBlizzardGamepadDB = EnhancedBlizzardGamepadDB or {}
             ApplyDefaults(EnhancedBlizzardGamepadDB)
             ns.db = EnhancedBlizzardGamepadDB
-            ns.padActive = HasDevice()
             if ns.OnCoreReady then ns.OnCoreReady() end
         end
         if ns.OnAddonLoaded then ns.OnAddonLoaded(name) end
     elseif event == "PLAYER_LOGIN" then
         if ns.OnLogin then ns.OnLogin() end
-    elseif event == "GAME_PAD_ACTIVE_CHANGED" then
-        ns.sawActiveEvent = true
-        ns.padActive = (...) and true or false
+    elseif event == "GAME_PAD_ACTIVE_CHANGED" or event == "GAME_PAD_CONNECTED" or event == "GAME_PAD_DISCONNECTED" then
         if ns.OnPadStateChanged then ns.OnPadStateChanged() end
-    elseif event == "GAME_PAD_CONNECTED" or event == "GAME_PAD_DISCONNECTED" then
-        ns.padActive = HasDevice()
-        if ns.OnPadStateChanged then ns.OnPadStateChanged() end
+    elseif event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" then
+        ns.RecordBlockedAction(event, ...)
     elseif event == "PLAYER_REGEN_DISABLED" then
         if ns.OnCombatStart then ns.OnCombatStart() end
     elseif event == "PLAYER_REGEN_ENABLED" then
@@ -138,6 +123,56 @@ f:RegisterEvent("PLAYER_REGEN_ENABLED")
 SafeRegister(f, "GAME_PAD_ACTIVE_CHANGED")
 SafeRegister(f, "GAME_PAD_CONNECTED")
 SafeRegister(f, "GAME_PAD_DISCONNECTED")
+SafeRegister(f, "ADDON_ACTION_BLOCKED")
+SafeRegister(f, "ADDON_ACTION_FORBIDDEN")
+
+-- Blocked action log ----------------------------------------------------------
+-- When Blizzard blocks an action it names the addon and the protected function. That is saved
+-- with the last text field this addon wrote into, so the write that caused the taint can be
+-- found afterwards. Kept in saved variables (db.blocked) and shown by /ebg blocked.
+
+local function FrameChain(box)
+    if type(box) ~= "table" then return "none" end
+    if box.isComposer then return "EBGComposer" end
+    local parts, f = {}, box
+    for _ = 1, 8 do
+        if not f or (f.IsForbidden and f:IsForbidden()) then break end
+        parts[#parts + 1] = (f.GetName and f:GetName()) or (f.GetDebugName and f:GetDebugName()) or "?"
+        f = f.GetParent and f:GetParent()
+    end
+    return table.concat(parts, " < ")
+end
+
+local lastWrite
+
+-- Called for every write into a real text field.
+function ns.NoteWrite(box, op)
+    local ok, chain = pcall(FrameChain, box)
+    lastWrite = { chain = ok and chain or "unreadable", op = op, t = GetTime() }
+end
+
+function ns.RecordBlockedAction(event, addon, func)
+    local db = ns.db
+    if not db then return end
+    db.blocked = db.blocked or {}
+    local okT, target = pcall(FrameChain, ns.KB and ns.KB.target)
+    local okF, focus = pcall(FrameChain, GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus())
+    local entry = {
+        when = date("%Y-%m-%d %H:%M:%S"),
+        event = event,
+        addon = tostring(addon),
+        func = tostring(func),
+        keyboardShown = ns.KB and ns.KB.frame:IsShown() or false,
+        target = okT and target or "unreadable",
+        focus = okF and focus or "unreadable",
+        lastWrite = lastWrite and ("%s into %s, %.1fs earlier"):format(lastWrite.op, lastWrite.chain, GetTime() - lastWrite.t) or "none this session",
+    }
+    table.insert(db.blocked, entry)
+    while #db.blocked > 30 do table.remove(db.blocked, 1) end
+    if tostring(addon) == ADDON then
+        ns.Print(("Blocked action recorded: %s (%s). Last write: %s"):format(entry.func, event, entry.lastWrite))
+    end
+end
 
 -- Utilities ------------------------------------------------------------------
 function ns.Print(msg)
@@ -359,6 +394,22 @@ local function HandleSlash(msg)
         end
         if ns.RebuildKeyboard then ns.RebuildKeyboard(true) end
         ns.Print("Selection glow atlas: " .. tostring(db.glowAtlas))
+    elseif cmd == "blocked" then
+        if rest == "clear" then
+            db.blocked = nil
+            ns.Print("Blocked action log cleared.")
+            return
+        end
+        local lines = {}
+        for i, e in ipairs(db.blocked or {}) do
+            lines[#lines + 1] = ("%d. %s  %s"):format(i, e.when, e.event)
+            lines[#lines + 1] = "   addon: " .. e.addon .. "   function: " .. e.func
+            lines[#lines + 1] = "   keyboard shown: " .. tostring(e.keyboardShown) .. "   target: " .. e.target
+            lines[#lines + 1] = "   focus: " .. e.focus
+            lines[#lines + 1] = "   last write: " .. e.lastWrite
+        end
+        if #lines == 0 then lines[1] = "No blocked actions recorded." end
+        ns.ShowReport("blocked", lines)
     elseif cmd == "status" then
         local box = GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus()
         local style, devName = ns.LabelStyle()
@@ -367,12 +418,11 @@ local function HandleSlash(msg)
             "Addon version: " .. ns.VERSION,
             "Build: " .. table.concat({ GetBuildInfo() }, " / "),
             "",
-            "C_GamePad.IsEnabled: " .. tostring(C_GamePad and C_GamePad.IsEnabled and C_GamePad.IsEnabled()),
+            "C_InputInterfaceStyle.GetCurrentStyle: " .. tostring(C_InputInterfaceStyle and C_InputInterfaceStyle.GetCurrentStyle and C_InputInterfaceStyle.GetCurrentStyle()),
             "Active device ID: " .. tostring(id),
             "Device name: " .. tostring(devName),
             "labelStyle: " .. tostring(style),
             "GlyphStyle: " .. ns.GlyphStyle(),
-            "Saw GAME_PAD_ACTIVE_CHANGED: " .. tostring(ns.sawActiveEvent) .. "  padActive=" .. tostring(ns.padActive),
             "IsGamepadActive(): " .. tostring(ns.IsGamepadActive()),
             "",
             "Focused edit box: " .. (box and (box:IsForbidden() and "forbidden" or (box:GetName() or "unnamed")) or "none"),
@@ -391,7 +441,7 @@ local function HandleSlash(msg)
         lines[#lines + 1] = "Nav pointer: " .. ns.PointerDiagnostics()
         ns.ShowReport("status", lines)
     else
-        ns.Print("Commands: show, hide, toggle, auto [on|off], pad [on|off], layout <id>, scale <0.5-2>, skin <id>, glow <atlas|off>, atlas [FrameName|ui], bg <atlas|default>, shade <0-1>, keyart <up> [down]|off|default, keypad <0-0.4>, keybleed <0-12>, keyglow <0-2>, entrybox <base>|off|default, glyphs, mixins, probe <FrameName>, check <atlas names>, legendart, lfg, bagsearch, enter, legend, chatbox, pointer, mirror, mirrorscroll, fadechat, prompts, sounds, status")
+        ns.Print("Commands: show, hide, toggle, auto [on|off], pad [on|off], layout <id>, scale <0.5-2>, skin <id>, glow <atlas|off>, atlas [FrameName|ui], bg <atlas|default>, shade <0-1>, keyart <up> [down]|off|default, keypad <0-0.4>, keybleed <0-12>, keyglow <0-2>, entrybox <base>|off|default, glyphs, mixins, probe <FrameName>, check <atlas names>, legendart, lfg, bagsearch, enter, legend, chatbox, pointer, mirror, mirrorscroll, fadechat, prompts, sounds, blocked [clear], status")
     end
 end
 

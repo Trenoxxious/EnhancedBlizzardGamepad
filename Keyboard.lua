@@ -774,7 +774,7 @@ local function QuestLogEntries()
     for i = 1, n do
         local info = C_QuestLog.GetInfo(i)
         if info and not info.isHeader and not info.isHidden and info.questID and info.title then
-            list[#list + 1] = { id = info.questID, title = info.title, level = info.level, difficulty = info.difficultyLevel }
+            list[#list + 1] = { id = info.questID, title = info.title, level = info.level, difficulty = info.difficultyLevel, index = i }
         end
     end
     return list
@@ -802,14 +802,18 @@ function KB:QuestRows()
     if #quests == 0 then
         rows[1] = { { label = "No quests in your log", w = 12, action = "letters" } }
     end
+    self.questTextCache = {}
     local first = (self.questPage - 1) * QUESTS_PER_PAGE + 1
     for i = first, math.min(#quests, first + QUESTS_PER_PAGE - 1) do
         local q = quests[i]
         local label = q.title
         if q.level and q.level > 0 then label = "[" .. q.level .. "] " .. label end
+        -- A second quest's log index lets the details pane check that quest text is read per quest.
+        local other = quests[i == 1 and 2 or 1]
         rows[#rows + 1] = {
             h = QUEST_ROW_H, gap = QUEST_ROW_GAP,
-            { label = label, w = 12, action = "questlink", questID = q.id, title = q.title, small = true, color = QuestColor(q) },
+            { label = label, w = 12, action = "questlink", questID = q.id, title = q.title, small = true, color = QuestColor(q),
+              level = q.level, logIndex = q.index, otherIndex = other and other ~= q and other.index or nil },
         }
     end
     rows[#rows + 1] = {
@@ -824,6 +828,201 @@ local function QuestLink(questID, title)
     local link = GetQuestLink and GetQuestLink(questID)
     if not link and C_QuestLog and C_QuestLog.GetQuestLink then link = C_QuestLog.GetQuestLink(questID) end
     return link or ("[" .. title .. "]")
+end
+
+-- Quest details pane ----------------------------------------------------------------
+-- Sits to the right of the quest picker and shows the highlighted quest's name, description
+-- and objectives, so the player can see what they are about to link.
+
+local QUEST_PANE_ATLAS = "AdventureMapQuest-QuestPane"
+local QUEST_PANE_W, QUEST_PANE_H = 351, 438
+-- Where the visible art sits inside the atlas: transparent margins, and the two metal bars.
+-- titleY / footerY: distance of each bar's text centre from the pane's top / bottom edge.
+local QUEST_PANE_ART = { left = 28, right = 28, top = 44, bottom = 24, topBar = 25, bottomBar = 23, titleY = 9, footerY = 19.5 }
+local questPane
+
+-- Quest text is read by log index without changing the selected quest. Some clients ignore the
+-- index and return the selected quest's text instead; that shows up as another quest returning
+-- the very same text, and then no description is shown rather than a wrong one.
+local function QuestText(key)
+    if not GetQuestLogQuestText or not key.logIndex then return nil, nil end
+    local ok, desc, objective = pcall(GetQuestLogQuestText, key.logIndex)
+    if not ok or type(desc) ~= "string" then return nil, nil end
+    if key.otherIndex then
+        local ok2, desc2, objective2 = pcall(GetQuestLogQuestText, key.otherIndex)
+        if ok2 and desc2 == desc and objective2 == objective then return nil, nil end
+    end
+    if desc == "" then desc = nil end
+    if type(objective) ~= "string" or objective == "" then objective = nil end
+    return desc, objective
+end
+
+local function QuestObjectiveLines(key)
+    local lines = {}
+    local ok, list = pcall(function()
+        return C_QuestLog and C_QuestLog.GetQuestObjectives and C_QuestLog.GetQuestObjectives(key.questID)
+    end)
+    if ok and type(list) == "table" then
+        for _, o in ipairs(list) do
+            if type(o) == "table" and type(o.text) == "string" and o.text ~= "" then
+                lines[#lines + 1] = { text = o.text, finished = o.finished and true or false }
+            end
+        end
+    elseif GetNumQuestLeaderBoards and GetQuestLogLeaderBoard and key.logIndex then
+        local okN, n = pcall(GetNumQuestLeaderBoards, key.logIndex)
+        for i = 1, okN and tonumber(n) or 0 do
+            local okL, text, _, finished = pcall(GetQuestLogLeaderBoard, i, key.logIndex)
+            if okL and type(text) == "string" and text ~= "" then
+                lines[#lines + 1] = { text = text, finished = finished and true or false }
+            end
+        end
+    end
+    return lines
+end
+
+local function QuestDetails(self, key)
+    local cache = self.questTextCache
+    local d = cache and cache[key.questID]
+    if not d then
+        local desc, objective = QuestText(key)
+        d = { desc = desc, objective = objective, lines = QuestObjectiveLines(key) }
+        if cache then cache[key.questID] = d end
+    end
+    return d
+end
+
+local function CreateQuestPane()
+    -- The frame is the size of the visible art; the atlas's transparent margins hang outside it.
+    local art = QUEST_PANE_ART
+    local p = CreateFrame("Frame", nil, frame)
+    p:SetSize(QUEST_PANE_W - art.left - art.right, QUEST_PANE_H - art.top - art.bottom)
+    p:SetPoint("BOTTOMLEFT", frame, "BOTTOMRIGHT", 6, 0)
+    p.bg = p:CreateTexture(nil, "BACKGROUND")
+    p.parchment = C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(QUEST_PANE_ATLAS) ~= nil
+    if p.parchment then
+        p.bg:SetAtlas(QUEST_PANE_ATLAS, false)
+        p.bg:SetSize(QUEST_PANE_W, QUEST_PANE_H)
+        p.bg:SetPoint("TOPLEFT", -art.left, art.top)
+    else
+        p.bg:SetAllPoints()
+        p.bg:SetColorTexture(0, 0, 0, 0.85)
+    end
+
+    -- Quest name in the top metal bar, quest level in the bottom one.
+    local function BarText(point, y)
+        local fs = p:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        fs:SetPoint("LEFT", p, point .. "LEFT", 16, y)
+        fs:SetPoint("RIGHT", p, point .. "RIGHT", -16, y)
+        fs:SetJustifyH("CENTER")
+        fs:SetWordWrap(false)
+        return fs
+    end
+    p.title = BarText("TOP", -art.titleY)
+    p.footer = BarText("BOTTOM", art.footerY)
+    p.footer:SetFontObject(GameFontNormalSmall)
+    p.title:SetJustifyV("MIDDLE")
+    p.footer:SetJustifyV("MIDDLE")
+
+    -- Text area on the parchment between the two bars.
+    p.body = CreateFrame("Frame", nil, p)
+    p.body:SetPoint("TOPLEFT", 22, -(art.topBar + 16))
+    p.body:SetPoint("BOTTOMRIGHT", -22, art.bottomBar + 14)
+    p.body:SetClipsChildren(true)
+
+    local function Text()
+        local fs = p.body:CreateFontString(nil, "OVERLAY", _G.QuestFont and "QuestFont" or "GameFontHighlight")
+        fs:SetJustifyH("LEFT")
+        fs:SetJustifyV("TOP")
+        fs:SetWordWrap(true)
+        fs:SetShadowOffset(0, 0)
+        -- Dark ink on parchment; light text on the plain fallback background.
+        if p.parchment then fs:SetTextColor(0.16, 0.1, 0.04) else fs:SetTextColor(1, 1, 1) end
+        return fs
+    end
+    p.summary = Text()
+    p.obj = Text()
+    p.rule = p.body:CreateTexture(nil, "ARTWORK")
+    p.rule:SetHeight(1)
+    if p.parchment then p.rule:SetColorTexture(0.25, 0.1, 0, 0.35) else p.rule:SetColorTexture(1, 1, 1, 0.25) end
+    p.doneColor = p.parchment and "|cff1d5c1d" or "|cff40d040"
+    p:Hide()
+    return p
+end
+
+-- Lays out one text block under the previous one, cut off (with an ellipsis) at maxH.
+local function PlaceQuestText(fs, width, y, maxH)
+    fs:ClearAllPoints()
+    fs:SetPoint("TOPLEFT", 0, -y)
+    fs:SetWidth(width)
+    fs:SetHeight(0)
+    local h = fs:GetStringHeight() or 0
+    if maxH and h > maxH then
+        h = math.max(0, maxH)
+        fs:SetHeight(h)
+    end
+    fs:Show()
+    return h
+end
+
+function KB:RefreshQuestPane()
+    if self.page ~= "quests" then
+        if questPane then questPane:Hide() end
+        self.questPaneKey = nil
+        return
+    end
+    -- On the Prev/Back/Next row the pane keeps the last quest shown.
+    local b = self.sel and self.grid[self.sel[1]] and self.grid[self.sel[1]][self.sel[2]]
+    local key = b and type(b.key) == "table" and b.key.action == "questlink" and b.key or self.questPaneKey
+    if not key then
+        if questPane then questPane:Hide() end
+        return
+    end
+    questPane = questPane or CreateQuestPane()
+    local p = questPane
+    if key == p.shownKey and p:IsShown() then return end
+    self.questPaneKey, p.shownKey = key, key
+    p:Show()
+
+    local d = QuestDetails(self, key)
+    local width, height = p.body:GetWidth(), p.body:GetHeight()
+    if not width or width <= 0 then width, height = p:GetWidth() - 44, p:GetHeight() - 78 end
+
+    p.title:SetText(((key.title or ""):gsub("|", "||")))
+    if key.level and key.level > 0 then
+        p.footer:SetText((LEVEL or "Level") .. " " .. key.level)
+        local c = key.color or { 1, 0.82, 0 }
+        p.footer:SetTextColor(c[1], c[2], c[3])
+    else
+        p.footer:SetText("")
+    end
+
+    local parts = {}
+    for _, line in ipairs(d.lines) do
+        parts[#parts + 1] = line.finished and (p.doneColor .. "- " .. line.text .. "|r") or ("- " .. line.text)
+    end
+    local hasLines = #parts > 0
+    p.obj:SetText(table.concat(parts, "\n"))
+    p.summary:SetText(d.objective or (hasLines and "" or "No objectives listed for this quest."))
+
+    -- Progress lines are measured first so a long summary cannot push them out of the pane.
+    local gap = 10
+    local linesH = hasLines and PlaceQuestText(p.obj, width, 0, height * 0.6) or 0
+    local y = 0
+    if d.objective or not hasLines then
+        y = PlaceQuestText(p.summary, width, 0, height - (hasLines and (linesH + gap * 2 + 1) or 0))
+    else
+        p.summary:Hide()
+    end
+    if hasLines and y > 0 then
+        p.rule:ClearAllPoints()
+        p.rule:SetPoint("TOPLEFT", 0, -(y + gap))
+        p.rule:SetPoint("TOPRIGHT", 0, -(y + gap))
+        p.rule:Show()
+        y = y + gap * 2 + 1
+    else
+        p.rule:Hide()
+    end
+    if hasLines then PlaceQuestText(p.obj, width, y, linesH) else p.obj:Hide() end
 end
 
 local function LinkSpans(text)
@@ -993,6 +1192,7 @@ function KB:RefreshKeys()
             if glow then glow:SetShown(selected) elseif b.glow then b.glow:Hide() end
         end
     end
+    self:RefreshQuestPane()
 end
 
 function KB:RefreshHeader()
@@ -1186,6 +1386,7 @@ end
 function KB:Insert(s)
     local box = TextTarget(self)
     if not box then return end
+    if box == self.target and not box.isComposer then ns.NoteWrite(box, "Insert") end
     box:Insert(s)
     self:RefreshPreview()
 end
@@ -1201,6 +1402,7 @@ function KB:Backspace()
     for _, sp in ipairs(LinkSpans(text)) do
         if start >= sp[1] and start <= sp[2] then start, stop = sp[1], math.max(pos, sp[2]) break end
     end
+    if box == self.target and not box.isComposer then ns.NoteWrite(box, "SetText (backspace)") end
     box:SetText(text:sub(1, start - 1) .. text:sub(stop + 1))
     box:SetCursorPosition(start - 1)
     self:RefreshPreview()
@@ -1214,6 +1416,7 @@ function KB:DeleteWord()
     if pos <= 0 then return end
     local head = text:sub(1, pos)
     local cut = head:match("^(.-)%s*%S+%s*$") or ""
+    if box == self.target and not box.isComposer then ns.NoteWrite(box, "SetText (delete word)") end
     box:SetText(cut .. text:sub(pos + 1))
     box:SetCursorPosition(#cut)
     self:RefreshPreview()
@@ -1273,6 +1476,11 @@ function KB:Submit()
         ChatEdit_SendText(box, 1)
         pcall(box.SetText, box, "")
         self:RefreshPreview()
+        -- With focus already gone Blizzard will not close chat, so nothing else would hide the keyboard.
+        -- A mouse click on Send takes focus before the loss is noticed, so check the box itself;
+        -- submittedAt covers the loss being reported just after this.
+        self.submittedAt = GetTime()
+        if self.detached or not box:HasFocus() then ns.HideKeyboard() end
         return
     end
     if ns.db and ns.db.submitEnter then
@@ -1572,6 +1780,12 @@ end)
 local previewElapsed = 0
 frame:SetScript("OnUpdate", function(self, dt)
     local now = GetTime()
+    -- Once a click on the keyboard has cost the text field its focus, no focus event will close
+    -- the keyboard any more, so a click anywhere outside it does.
+    if KB.detached and not KB.closing and IsMouseButtonDown and IsMouseButtonDown() and not self:IsMouseOver() then
+        ns.HideKeyboard()
+        return
+    end
     if mirrorDir and now >= mirrorNext then
         if not ns.ScrollChatMirror(mirrorDir) then mirrorDir = nil end
         mirrorNext = now + 0.07
@@ -1641,6 +1855,7 @@ end
 
 function KB:SetTarget(box)
     self.target = box
+    self.detached = false
     ns.ApplyChatBoxVisibility()
     if box and not box:IsForbidden() and ns.IsChatBox(box) then ns.ShowChatMirror() else ns.HideChatMirror() end
     local numeric = box and box.IsNumeric and box:IsNumeric()
@@ -1823,6 +2038,7 @@ function KB:FinishClose()
     frame:SetAlpha(1)
     frame:Hide()
     self.target = nil
+    self.detached = false
     ns.SetNativeLegendHidden(false)
     ns.SetNavPointerHidden(false)
     ns.ApplyChatBoxVisibility()
@@ -1890,7 +2106,16 @@ function ns.OnTargetFocused(box)
     ns.ApplyChatBoxVisibility()
 end
 
+-- A mouse click on the keyboard can make Blizzard take focus away from the text field. That is
+-- not the player leaving the field, so the keyboard stays up and keeps writing into it; it then
+-- closes on Send, Close or when another field takes focus.
 function ns.OnTargetLost()
+    local box = KB.target
+    local justSent = KB.submittedAt and GetTime() - KB.submittedAt < 0.5
+    if not justSent and frame:IsShown() and not KB.closing and box and not box:IsForbidden() and frame:IsMouseOver() then
+        KB.detached = true
+        return
+    end
     ns.HideKeyboard()
 end
 
