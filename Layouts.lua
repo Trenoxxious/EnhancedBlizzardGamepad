@@ -8,9 +8,16 @@ local AC = { label = "Àé",    w = 1.5, action = "accents" }
 local EN = { label = "Enter", w = 2.5, action = "submit", pad = "PADRTRIGGER" }
 local SP = { label = "Space", w = 7, action = "space", pad = "PAD4" }
 local CL = { label = "Close", w = 2, action = "close", pad = "PAD2" }
-local SP4 = { label = "Space", w = 4.5, action = "space", pad = "PAD4" }
-local QK = { label = "", icon = "QuestLog-tab-icon-quest", w = 1, action = "quests", chatOnly = true }
-local IK = { label = "Items", w = 1.5, action = "items", chatOnly = true }
+local SP4 = { label = "Space", w = 4, action = "space", pad = "PAD4" }
+-- Icon keys: `icon` is an atlas, `iconFile` a texture path tried if the atlas is missing, and
+-- `iconText` the label shown if neither exists on this client.
+local QK = { label = "", icon = "gamepad-radial-icon-quests", iconFile = "Interface\\Gamepad\\gamepad-radial-icon-quests",
+    iconText = "Q", w = 1, action = "quests", chatOnly = true }
+local IK = { label = "", icon = "gamepad-radial-icon-bags", iconFile = "Interface\\Gamepad\\gamepad-radial-icon-bags",
+    iconText = "Items", w = 1, action = "items", chatOnly = true }
+-- Reloads the UI (the same as typing /reload).
+local RL = { label = "", icon = "gamepad-radial-icon-editcrossbars-up", iconFile = "Interface\\Gamepad\\gamepad-radial-icon-editcrossbars-up",
+    iconText = "Reload", w = 1, action = "reload" }
 local LT = { label = "<",     w = 1,   action = "caretleft" }
 local RT = { label = ">",     w = 1,   action = "caretright" }
 
@@ -71,7 +78,7 @@ local function define(id, name, letterRows, opts)
         rows[#rows + 1] = r
     end
     rows[#rows] = row(SH, rows[#rows], EN) -- wrap last letter row with Shift and Enter
-    rows[#rows + 1] = row(SY, AC, QK, IK, ",", SP4, ".")
+    rows[#rows + 1] = row(SY, AC, QK, IK, RL, ",", SP4, ".")
     ns.Layouts[id] = { id = id, name = name, rows = rows, accents = opts.accents }
     for _, loc in ipairs(opts.locales or {}) do ns.LocaleLayout[loc] = id end
 end

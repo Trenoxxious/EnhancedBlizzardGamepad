@@ -355,7 +355,26 @@ local events = CreateFrame("Frame")
 for _,event in ipairs({"COMMODITY_PRICE_UPDATED","COMMODITY_PRICE_UNAVAILABLE","COMMODITY_PURCHASE_SUCCEEDED","COMMODITY_PURCHASE_FAILED",
     "AUCTION_HOUSE_PURCHASE_COMPLETED","BID_ADDED","BIDS_UPDATED","AUCTION_CANCELED","AUCTION_HOUSE_AUCTION_CREATED","AUCTION_MULTISELL_START","AUCTION_MULTISELL_UPDATE",
     "AUCTION_MULTISELL_FAILURE","AUCTION_HOUSE_POST_WARNING","AUCTION_HOUSE_POST_ERROR","AUCTION_HOUSE_SHOW_ERROR","UI_ERROR_MESSAGE",
-    "AUCTION_HOUSE_CLOSED","PLAYER_REGEN_DISABLED"}) do pcall(events.RegisterEvent,events,event) end
+    "AUCTION_HOUSE_CLOSED","PLAYER_REGEN_DISABLED","OWNED_AUCTIONS_UPDATED","AUCTION_OWNED_LIST_UPDATE","CHAT_MSG_SYSTEM"}) do pcall(events.RegisterEvent,events,event) end
+-- Whether auction `id` is still in the client's list of your auctions (nil if the list is unavailable).
+local function StillOwned(id)
+    local api = C_AuctionHouse
+    if not (api.GetNumOwnedAuctions and api.GetOwnedAuctionInfo) then return nil end
+    for i = 1,api.GetNumOwnedAuctions() or 0 do
+        local info = api.GetOwnedAuctionInfo(i)
+        if info and info.auctionID == id then return true end
+    end
+    return false
+end
+-- A cancellation is confirmed in different ways on different clients, so any of these counts:
+-- AUCTION_CANCELED (with this auction's ID, or none), Blizzard's "Auction cancelled." system
+-- message, or a refreshed list of your auctions that no longer has it.
+local function CancelConfirmed(t,event,a)
+    if event == "AUCTION_CANCELED" then return a == nil or a == t.auctionID end
+    if event == "CHAT_MSG_SYSTEM" then return ERR_AUCTION_REMOVED ~= nil and a == ERR_AUCTION_REMOVED end
+    if event == "OWNED_AUCTIONS_UPDATED" or event == "AUCTION_OWNED_LIST_UPDATE" then return StillOwned(t.auctionID) == false end
+    return false
+end
 events:SetScript("OnEvent",function(_,event,a,b)
     local t = Trade.current
     if not t then return end
@@ -375,7 +394,7 @@ events:SetScript("OnEvent",function(_,event,a,b)
     elseif t.phase == "sending" or t.phase == "quote" then
         local success = t.phase == "sending" and (t.kind == "buy" and ((t.commodity and event == "COMMODITY_PURCHASE_SUCCEEDED") or
             (not t.commodity and a == t.auctionID and (event == "AUCTION_HOUSE_PURCHASE_COMPLETED" or event == "BID_ADDED")))
-            or t.kind == "cancel" and event == "AUCTION_CANCELED" and a == t.auctionID)
+            or t.kind == "cancel" and CancelConfirmed(t,event,a))
         if t.kind == "buy" and not t.commodity and t.method == "bid" and event == "BIDS_UPDATED" and C_AuctionHouse.GetBids then
             for _,bid in ipairs(C_AuctionHouse.GetBids() or {}) do
                 if bid.auctionID == t.auctionID and bid.bidAmount == t.total and bid.bidder == UnitGUID("player") then success=true break end
@@ -389,8 +408,14 @@ events:SetScript("OnEvent",function(_,event,a,b)
         if success then
             t.phase,t.message = "done",t.kind == "sell" and "Auction posted." or t.kind == "cancel" and "Auction cancelled. Items will arrive by mail." or
                 (t.method == "bid" and not t.commodity and "Bid placed." or "Purchase complete. Collect your items from the mailbox.")
-            Data.mode,Data.rows,Data.more,Data.message = "invalid",{},false,"Auction changed. Search or refresh for current results."
-            if Data.changed then Data.changed() end
+            if t.kind == "cancel" then
+                -- The Auctions tab underneath reloads instead, so it is current on Done. (A list
+                -- query may already be on its way; its own update event will finish it.)
+                C_Timer.After(0.3,function() if not Data.busy then Data.Owned() end end)
+            else
+                Data.mode,Data.rows,Data.more,Data.message = "invalid",{},false,"Auction changed. Search or refresh for current results."
+                if Data.changed then Data.changed() end
+            end
             Changed()
         elseif event == "AUCTION_HOUSE_POST_ERROR" or event == "AUCTION_MULTISELL_FAILURE" or event == "COMMODITY_PURCHASE_FAILED" or event == "AUCTION_HOUSE_SHOW_ERROR" or event == "UI_ERROR_MESSAGE" then
             if event == "AUCTION_HOUSE_POST_ERROR" and t.kind == "sell" then
@@ -409,6 +434,11 @@ events:SetScript("OnUpdate",function()
     if not t then return end
     if t.phase == "review" and t.kind == "buy" and t.commodity and C_AuctionHouse.GetQuoteDurationRemaining() <= 0 then
         Fail("The price quote expired. Request a new quote.")
+    elseif t.kind == "cancel" and t.phase == "sending" and not t.recheck and GetTime() - t.started > 3 then
+        -- No confirmation yet: reload the list of your auctions once; if this auction is gone from
+        -- it, the cancellation went through (see CancelConfirmed).
+        t.recheck = true
+        if not Data.busy then Data.Owned() end
     elseif (t.phase == "sending" or t.phase == "quote") and GetTime() - t.started > 30 then
         Fail("No response yet. Check your auctions, bags, and mailbox before trying again; this request will not be repeated automatically.")
     end

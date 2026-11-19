@@ -34,6 +34,73 @@ function Style.Pane(parent, x, y, w, h, kind)
     p:SetFrameLevel(parent:GetFrameLevel())
     return p
 end
+-- A showcase pane (the item preview): Blizzard's tiled Necrolord background inside a bronze frame.
+-- The frame uses the first bronze-toned art kit this client has (corner/edge atlases named like
+-- DiamondMetal's), else a drawn bronze border.
+local function AtlasExists(name) return C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(name) ~= nil end
+local FRAME_KITS = { "Bronze", "Necrolord" }
+local CORNER_MAX = 40
+local function KitFrame(p, kit)
+    local name = {
+        tl = "UI-Frame-%s-CornerTopLeft", tr = "UI-Frame-%s-CornerTopRight",
+        bl = "UI-Frame-%s-CornerBottomLeft", br = "UI-Frame-%s-CornerBottomRight",
+        top = "_UI-Frame-%s-EdgeTop", bottom = "_UI-Frame-%s-EdgeBottom",
+        left = "!UI-Frame-%s-EdgeLeft", right = "!UI-Frame-%s-EdgeRight",
+    }
+    for k, v in pairs(name) do name[k] = v:format(kit) if not AtlasExists(name[k]) then return false end end
+    local t = {}
+    for _, k in ipairs({ "tl", "tr", "bl", "br", "top", "bottom", "left", "right" }) do
+        t[k] = p:CreateTexture(nil, "BORDER")
+        t[k]:SetAtlas(name[k], true)
+    end
+    -- Large kit corners are scaled down so the frame stays a trim, not a second panel.
+    local cw, ch = t.tl:GetSize()
+    local s = math.min(1, CORNER_MAX / math.max(1, cw or 1), CORNER_MAX / math.max(1, ch or 1))
+    for _, k in ipairs({ "tl", "tr", "bl", "br" }) do
+        local w, h = t[k]:GetSize()
+        t[k]:SetSize((w or CORNER_MAX) * s, (h or CORNER_MAX) * s)
+    end
+    t.tl:SetPoint("TOPLEFT") t.tr:SetPoint("TOPRIGHT") t.bl:SetPoint("BOTTOMLEFT") t.br:SetPoint("BOTTOMRIGHT")
+    -- Edges keep their own thickness, scaled with the corners.
+    t.top:SetHorizTile(true) t.top:SetHeight((t.top:GetHeight() or 8) * s)
+    t.top:SetPoint("TOPLEFT", t.tl, "TOPRIGHT") t.top:SetPoint("TOPRIGHT", t.tr, "TOPLEFT")
+    t.bottom:SetHorizTile(true) t.bottom:SetHeight((t.bottom:GetHeight() or 8) * s)
+    t.bottom:SetPoint("BOTTOMLEFT", t.bl, "BOTTOMRIGHT") t.bottom:SetPoint("BOTTOMRIGHT", t.br, "BOTTOMLEFT")
+    t.left:SetVertTile(true) t.left:SetWidth((t.left:GetWidth() or 8) * s)
+    t.left:SetPoint("TOPLEFT", t.tl, "BOTTOMLEFT") t.left:SetPoint("BOTTOMLEFT", t.bl, "TOPLEFT")
+    t.right:SetVertTile(true) t.right:SetWidth((t.right:GetWidth() or 8) * s)
+    t.right:SetPoint("TOPRIGHT", t.tr, "BOTTOMRIGHT") t.right:SetPoint("BOTTOMRIGHT", t.br, "TOPRIGHT")
+    return true
+end
+function Style.ShowcasePane(parent, x, y, w, h)
+    local p = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    p:SetPoint("TOPLEFT", x, y)
+    p:SetSize(w, h)
+    p:SetFrameLevel(parent:GetFrameLevel())
+    local base = p:CreateTexture(nil, "BACKGROUND", nil, -8)
+    base:SetPoint("TOPLEFT", 4, -4) base:SetPoint("BOTTOMRIGHT", -4, 4)
+    base:SetColorTexture(0.03, 0.03, 0.03, 0.92)
+    local bg = "UI-Frame-Necrolord-BackgroundTile"
+    if AtlasExists(bg) then
+        local tile = p:CreateTexture(nil, "BACKGROUND", nil, -7)
+        tile:SetPoint("TOPLEFT", 4, -4) tile:SetPoint("BOTTOMRIGHT", -4, 4)
+        tile:SetAtlas(bg, false)
+        tile:SetHorizTile(true)
+        tile:SetVertTile(true)
+    end
+    p.kit = nil
+    for _, kit in ipairs(FRAME_KITS) do if KitFrame(p, kit) then p.kit = kit break end end
+    if not p.kit then
+        -- Drawn bronze: a bright outer line over a darker inner one.
+        p:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 2 })
+        p:SetBackdropBorderColor(0.72, 0.52, 0.28, 1)
+        local inner = CreateFrame("Frame", nil, p, "BackdropTemplate")
+        inner:SetPoint("TOPLEFT", 2, -2) inner:SetPoint("BOTTOMRIGHT", -2, 2)
+        inner:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+        inner:SetBackdropBorderColor(0.33, 0.22, 0.10, 1)
+    end
+    return p
+end
 function Style.Band(parent, x, y, w, h)
     local t = parent:CreateTexture(nil, "BORDER")
     t:SetPoint("TOPLEFT", x, y)
@@ -108,6 +175,7 @@ end
 -- Shows a controller glyph on a key, the way the keyboard marks its shortcut keys.
 function Style.Glyph(b, button)
     b.glyphButton = button
+    b.glyphSize = 24
     if ns.KB and ns.KB.SetKeyGlyph then ns.KB.SetKeyGlyph(ns.KB, b, button) end
 end
 local function PaintKey(b, focused)
@@ -149,7 +217,15 @@ function Style.Paint(b, focused)
     else b.wash:SetColorTexture(0.5,0.34,0.08,0.22) end
     b.marker:SetShown(b.active and role == "category")
     b.line:SetShown(role ~= "category" or b.depth == 0)
-    if b.item and b.item.quality then b.text:SetTextColor(unpack(ns.Inventory.Color(b.item.quality)))
+    if b.inset then
+        -- A text field skinned like the keyboard's strip: its art shows through, warmed on focus.
+        b.face:SetColorTexture(0,0,0,0)
+        b.line:Hide()
+        local tint = focused and {1,0.88,0.6} or {1,1,1}
+        for _, t in ipairs(b.inset.tintArt or {}) do t:SetVertexColor(unpack(tint)) end
+    end
+    if b.sold then b.text:SetTextColor(0.5,0.5,0.5) -- a sold auction of yours is greyed out
+    elseif b.item and b.item.quality then b.text:SetTextColor(unpack(ns.Inventory.Color(b.item.quality)))
     elseif b.active then b.text:SetTextColor(1,0.82,0.35)
     elseif role == "category" then b.text:SetTextColor(0.85,0.79,0.61)
     elseif role == "search" and b.placeholder then b.text:SetTextColor(0.55,0.53,0.48)

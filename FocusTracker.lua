@@ -97,19 +97,35 @@ end
 
 local lossTimer
 
-local function SetCurrent(box)
-    if box == current then return end
-    current = box
-    if box then
-        if ns.OnTargetFocused then ns.OnTargetFocused(box) end
-    else
-        if ns.OnTargetLost then ns.OnTargetLost() end
+-- Focus callbacks run from the 0.1s poll and from hooks on Blizzard's fields, so an error in one
+-- is reported once instead of repeating every tick.
+local warned = false
+local function Notify(fn, ...)
+    if not fn then return end
+    local ok, err = pcall(fn, ...)
+    if not ok and not warned then
+        warned = true
+        ns.Print("Keyboard focus handling failed: " .. tostring(err))
     end
 end
 
+local function SetCurrent(box)
+    if box == current then return end
+    current = box
+    if box then Notify(ns.OnTargetFocused, box) else Notify(ns.OnTargetLost) end
+end
+
+-- A real focus gain on the field already tracked (it lost focus and got it back within the loss
+-- grace, or the keyboard was closed while it stayed tracked) still counts: the player opened it
+-- again, so the keyboard is offered again rather than left closed on an invisible chat box.
 local function OnGained(box)
     if lossTimer then lossTimer:Cancel(); lossTimer = nil end
-    if IsUsable(box) then SetCurrent(box) end
+    if not IsUsable(box) then return end
+    if box == current then
+        Notify(ns.OnTargetFocused, box)
+    else
+        SetCurrent(box)
+    end
 end
 
 local function OnLost(box)
@@ -149,7 +165,7 @@ local function ScheduleScan(delay)
     scanPending = true
     C_Timer.After(delay or 1, function()
         scanPending = false
-        Scan()
+        pcall(Scan)
     end)
 end
 
@@ -177,11 +193,14 @@ function ns.GetTarget()
     return current
 end
 
+-- The chat hook goes in first: it is what opens the keyboard for chat, so a failure in the
+-- frame scan must not cost it (the 0.1s poll covers fields the scan missed).
 function ns.OnLogin()
-    Scan()
     if hooksecurefunc and ChatEdit_ActivateChat then
         hooksecurefunc("ChatEdit_ActivateChat", function(editBox) OnGained(editBox) end)
     end
+    local ok, err = pcall(Scan)
+    if not ok then ns.Debug("focus scan failed", err) end
 end
 
 function ns.OnAddonLoaded(name)

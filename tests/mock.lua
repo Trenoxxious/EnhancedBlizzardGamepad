@@ -69,7 +69,7 @@ function Frame:IsPassword() return false end
 function Frame:EnableGamePadButton(v) assert(not combat, "capture changed in combat") self.capture=v end
 function Frame:EnableGamePadStick(v) assert(not combat, "stick capture changed in combat") end
 function Frame:SetPropagateKeyboardInput(v) assert(not combat, "propagation changed in combat") self.propagate=v end
-for _, name in ipairs({ "SetFrameStrata", "SetFrameLevel", "SetToplevel", "SetClampedToScreen", "EnableMouse", "SetAllPoints", "SetJustifyH", "SetJustifyV", "SetWordWrap", "SetColorTexture", "SetTextColor", "SetVertexColor", "SetFontObject", "SetBackdropColor", "SetBackdropBorderColor", "SetBlendMode", "SetTexCoord", "SetHorizTile", "SetVertTile", "SetScale", "SetShadowOffset", "SetClipsChildren", "SetMaxLines", "SetFading", "SetHyperlinksEnabled", "SetOwner", "SetHyperlink", "SetScrollChild", "SetMovable", "RegisterForDrag", "SetAtlas" }) do
+for _, name in ipairs({ "SetFrameStrata", "SetFrameLevel", "SetToplevel", "SetClampedToScreen", "EnableMouse", "SetAllPoints", "SetJustifyH", "SetJustifyV", "SetWordWrap", "SetColorTexture", "SetTextColor", "SetVertexColor", "SetDesaturated", "SetFontObject", "SetBackdropColor", "SetBackdropBorderColor", "SetBlendMode", "SetTexCoord", "SetHorizTile", "SetVertTile", "SetScale", "SetShadowOffset", "SetClipsChildren", "SetMaxLines", "SetFading", "SetHyperlinksEnabled", "SetOwner", "SetHyperlink", "SetScrollChild", "SetMovable", "RegisterForDrag", "SetAtlas" }) do
     Frame[name] = function() end
 end
 function Frame:SetScale(v) self.scale = v end

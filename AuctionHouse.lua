@@ -8,7 +8,7 @@ ns.Auction = Auction
 local frame, tooltip, launcher
 local tab, page, focus = 1, 1, 1
 local pendingPage
-local tabs = { "Buy", "Sell", "Recent", "Auctions" }
+local tabs = { "Buy", "Sell", "Auctions" } -- tab 1 browses, 2 sells, 3 lists your own auctions
 local categories, categoryPage, categoryRows = {}, 1, {}
 local filterMode, firstResult = false, 7
 local firstCategory, categoryFocus
@@ -18,6 +18,7 @@ local expanded = {}
 local CategorySelect, ToggleFilters, EditLevel, SortBy
 local controls, rows, buttons = {}, {}, {}
 local consumed, closing, capturing = {}, false, false
+local wasBusy = false -- a search was in progress at the last redraw
 local releaseAction
 local Refresh, Activate, SwitchTab, SearchInput
 local function KeyboardOpen() return ns.KB and ns.KB.frame:IsShown() end
@@ -38,6 +39,16 @@ local function Money(value)
     return ("%d%s"):format(copper, COPPER)
 end
 Auction.Money = Money
+-- "Sold" plus the time until the auction's gold reaches the mailbox. The server's countdown was read
+-- with the listing (item.mailIn at item.readAt), so it keeps counting down between refreshes.
+local function SoldText(item)
+    if not item.mailIn then return "Sold" end
+    local left = math.max(0, item.mailIn - (GetTime() - (item.readAt or GetTime())))
+    if left < 60 then return "Sold" end
+    local when = SecondsToTime and SecondsToTime(left, true) or (math.ceil(left / 60) .. " min")
+    return "Sold - " .. when
+end
+Auction.SoldText = SoldText
 local function Quantity(value)
     if not value then return "" end
     if BreakUpLargeNumbers then return BreakUpLargeNumbers(value) end
@@ -110,6 +121,18 @@ local function SetNativeHidden(hidden)
         end
     end
 end
+-- While the whole auction house is being closed (Auction.Exit), Blizzard's window stays faded until
+-- Blizzard has hidden it, so it never flashes into view on the way out.
+local exiting = false
+-- Counts browser openings. Delayed work from one visit checks it, so a timer started while leaving
+-- the auction house can never act on the browser after the player has walked back and reopened it.
+local opened = 0
+local function RestoreNative()
+    if exiting then
+        local visit = opened
+        C_Timer.After(0.3, function() if visit == opened then SetNativeHidden(false) end end)
+    else SetNativeHidden(false) end
+end
 local function FinishClose()
     if ns.AuctionTransactions then ns.AuctionTransactions.Close(true) end
     if ns.AuctionTradeUI then ns.AuctionTradeUI.Bind(false) end
@@ -117,19 +140,46 @@ local function FinishClose()
     releaseAction = nil
     wipe(consumed)
     Capture(false)
-    SetNativeHidden(false)
+    RestoreNative()
     if frame then frame:SetAlpha(1) frame:Hide() end
 end
 function Auction.Close(immediate)
     if KeyboardOpen() and ns.KB.target and ns.KB.target.auctionInput then ns.HideKeyboard() end
     if not frame then return end
-    SetNativeHidden(false)
+    RestoreNative()
     if not immediate and next(consumed) and not InCombatLockdown() then
         closing = true
         frame:SetAlpha(0)
         frame:EnableMouse(false)
-        C_Timer.After(1, function() if closing then FinishClose() end end)
+        local visit = opened
+        C_Timer.After(1, function() if closing and visit == opened then FinishClose() end end)
     else FinishClose() end
+end
+-- Leaving the browser ends the auction house visit: the auctioneer interaction is closed, and
+-- Blizzard closes its own window in response (EBG never hides Blizzard's frame itself). In gamepad
+-- mode Blizzard's window is therefore never left on screen.
+function Auction.Exit()
+    -- Never walk away from an auction request the server is still answering.
+    local t = ns.AuctionTransactions and ns.AuctionTransactions.current
+    if t and t.phase == "sending" then return end
+    exiting = true
+    local closed = false
+    if C_AuctionHouse and C_AuctionHouse.CloseAuctionHouse then closed = pcall(C_AuctionHouse.CloseAuctionHouse) end
+    if not closed and C_PlayerInteractionManager and C_PlayerInteractionManager.ClearInteraction
+        and Enum and Enum.PlayerInteractionType and Enum.PlayerInteractionType.Auctioneer then
+        closed = pcall(C_PlayerInteractionManager.ClearInteraction, Enum.PlayerInteractionType.Auctioneer)
+    end
+    if not closed and CloseAuctionHouse then closed = pcall(CloseAuctionHouse) end
+    if ns.NoteAction then ns.NoteAction("close auction house" .. (closed and "" or " (failed)")) end
+    -- AUCTION_HOUSE_CLOSED normally closes the browser; this covers a client that sends no event.
+    -- If the auction house was reopened within that second, the new visit is left alone.
+    local visit = opened
+    C_Timer.After(1, function()
+        if visit ~= opened then return end
+        if frame and frame:IsShown() and not closing then Auction.Close(true) end
+        exiting = false
+    end)
+    if not closed then exiting = false Auction.Close() end
 end
 local function Select(index)
     focus = math.max(1, math.min(index, #controls))
@@ -137,65 +187,37 @@ local function Select(index)
         Style.Paint(b, i == focus)
     end
     local b = controls[focus]
-    local item = b and b.item
-    local isListing = tab == 1 and Data.mode == "details" and not filterMode
-    frame.detailHeading:SetText(filterMode and "SEARCH OPTIONS" or (b and b.category and "CATEGORY" or "ITEM PREVIEW"))
-    frame.detailTitle:SetText(item and Escape(item.name) or (b and b.category and b.categoryLabel) or (filterMode and "Refine your search" or "Item details"))
-    frame.detailIcon:SetShown(item and item.icon ~= nil or false)
-    frame.detailTitle:ClearAllPoints()
-    frame.detailTitle:SetPoint("TOPLEFT", item and item.icon and 844 or 794, -132)
-    frame.detailTitle:SetWidth(item and item.icon and 222 or 272)
-    if item and item.icon then frame.detailIcon:SetTexture(item.icon) end
-    -- "Select to..." summaries repeat the action line at the bottom of the pane, so they are left out.
-    local summary = item and item.summary or ""
-    if summary:find("^Select") then summary = "" end
-    local description = item and summary or (filterMode and "Set your options, then choose Apply and search." or
-        "Highlight an item to see its price, quantity, and tooltip.")
-    if b and b.category then description = "Select to choose this category, then press Search.\n\nIndented rows narrow the category further. Back below the list steps up a level.\n\n" .. ns.Glyphs.Legend("PADDRIGHT", "moves to results.", 14) end
-    if item and item.price then description = description .. (description ~= "" and "\n\n" or "") .. (item.priceLabel or "Price") .. ": " .. Money(item.price) end
-    if item and item.bid then description = description .. "\nBid: " .. Money(item.bid) end
-    if item and item.count then description = description .. "\nQuantity: " .. item.count end
-    if item and type(item.price) == "number" and (item.count or 0) > 1 and item.priceLabel == "Stack buyout" then
-        description = description .. "\nPer item: " .. Money(math.ceil(item.price / item.count))
-    end
-    frame.detail:SetText(description)
-    local nextAction = ""
-    if item then
-        if filterMode then nextAction = "Select to change this option"
-        elseif tab == 2 then nextAction = "Select to prepare a sale"
-        elseif tab == 3 then nextAction = "Select to repeat this search"
-        elseif Data.backend == "legacy" then nextAction = "Purchase using the native window"
-        elseif isListing then nextAction = "Select to buy or bid"
-        elseif tab == 4 then nextAction = "Select to review cancellation"
-        else nextAction = "Select to view listings" end
-    end
-    frame.detailAction:SetText(nextAction ~= "" and ns.Glyphs.Legend("PAD1", nextAction, 16) or "")
-    -- The item's tooltip is the preview itself: drawn inside the pane in place of the title, with the
-    -- price and quantity beneath it. A tall or wide tooltip is scaled down to fit the pane.
+    local item = not filterMode and b and b.item or nil
+    -- The preview pane shows only the focused item's tooltip and its quantity; with no item it
+    -- fades to a faint outline. A tall or wide tooltip is scaled down to fit the pane.
     tooltip:Hide()
     local shown = false
-    if item and (item.link or item.itemID) then
+    -- Tooltips draw above every other frame, so the preview's is left out while a trade panel
+    -- (sell, buy or cancel) is open over the browser; it returns when the panel closes.
+    local trading = ns.AuctionTransactions and ns.AuctionTransactions.current
+    if item and (item.link or item.itemID) and not trading then
         tooltip:SetOwner(frame, "ANCHOR_NONE")
         tooltip:SetScale(1)
         tooltip:ClearAllPoints()
-        tooltip:SetPoint("TOPLEFT", frame, "TOPLEFT", 784, -126)
+        tooltip:SetPoint("TOPLEFT", frame, "TOPLEFT", 790, -104)
         local ok = pcall(tooltip.SetHyperlink, tooltip, item.link or ("item:" .. item.itemID))
         if ok and (not tooltip.NumLines or tooltip:NumLines() > 0) then
             tooltip:Show()
             local w, h = tooltip:GetWidth() or 0, tooltip:GetHeight() or 0
-            local textHeight = description ~= "" and 80 or 0
-            local scale = math.min(1, w > 0 and 292 / w or 1, h > 0 and (370 - textHeight) / h or 1)
+            local scale = math.min(1, w > 0 and 280 / w or 1, h > 0 and 380 / h or 1)
             tooltip:SetScale(scale)
             tooltip:ClearAllPoints()
-            tooltip:SetPoint("TOPLEFT", frame, "TOPLEFT", 784 / scale, -126 / scale)
+            tooltip:SetPoint("TOPLEFT", frame, "TOPLEFT", 790 / scale, -104 / scale)
             shown = true
         end
     end
-    frame.detailTitle:SetShown(not shown)
-    frame.detailIcon:SetShown(not shown and item and item.icon ~= nil or false)
-    frame.detail:ClearAllPoints()
-    if shown then frame.detail:SetPoint("TOPLEFT", tooltip, "BOTTOMLEFT", 10, -6)
-    else frame.detail:SetPoint("TOPLEFT", 794, -184) end
+    frame.detailIcon:SetShown(item and not shown and item.icon ~= nil or false)
+    if item and item.icon then frame.detailIcon:SetTexture(item.icon) end
+    frame.previewQuantity:SetText(item and item.count and ("Quantity: " .. Quantity(item.count)) or "")
+    frame.previewQuantity:ClearAllPoints()
+    if shown then frame.previewQuantity:SetPoint("TOPLEFT", tooltip, "BOTTOMLEFT", 6, -8)
+    else frame.previewQuantity:SetPoint("TOPLEFT", 798, item and item.icon and -170 or -112) end
+    frame.detailPane:SetAlpha(item and 1 or 0.25)
 end
 local function Button(label, x, y, w, h, action, role, group)
     local b = Style.Control(frame, role)
@@ -209,7 +231,7 @@ local function Button(label, x, y, w, h, action, role, group)
         for i, control in ipairs(controls) do if control == self then Select(i) break end end
     end)
     b:SetScript("OnClick", function(self)
-        if not InCombatLockdown() and not KeyboardOpen() and not closing then Style.Press(self) self.action() end
+        if not InCombatLockdown() and not KeyboardOpen() and not closing and not self.disabled then Style.Press(self) self.action() end
     end)
     return b
 end
@@ -293,12 +315,13 @@ local function Create()
     frame:EnableMouse(true)
     frame:Hide()
     ns.Skin.Panel(frame)
-    Style.Band(frame, 14, -12, 1072, 32)
+    -- The title bar runs flush along the top inner edge of the border.
+    frame.titleBand = Style.Band(frame, 0, 0, 1, 32)
+    ns.Skin.DockBar(frame.titleBand, frame, "TOP", 32)
     frame.categoryPane = Style.Pane(frame, 18, -92, 184, 448, "categories")
     frame.resultPane = Style.Pane(frame, 214, -174, 548, 304, "results")
-    frame.detailPane = Style.Pane(frame, 778, -92, 304, 448, "detail")
+    frame.detailPane = Style.ShowcasePane(frame, 778, -92, 304, 448)
     Style.Band(frame, 215, -175, 546, 26)
-    Style.Band(frame, 14, -602, 1072, 44)
     local function Label(font, x, y, width, text)
         local label = frame:CreateFontString(nil, "OVERLAY", font)
         label:SetPoint("TOPLEFT", x, y)
@@ -308,6 +331,8 @@ local function Create()
         return label
     end
     frame.title = Label("GameFontNormalLarge", 28, -20, 600, "Auction House")
+    frame.title:ClearAllPoints()
+    frame.title:SetPoint("LEFT", frame.titleBand, "LEFT", 14, 0)
     frame.breadcrumb = Label("GameFontHighlightSmall", 222, -58, 850)
     frame.breadcrumb:SetWordWrap(false)
     frame.viewTitle = Label("GameFontNormalLarge", 222, -94, 540)
@@ -324,11 +349,34 @@ local function Create()
         frame.tabButtons[i] = Button(name, 22 + (i - 1) * 142, -558, 132, 34,
             function() SwitchTab(index) end, "tab", "tabs")
     end
+    -- The bumpers that switch tabs, right of the last tab (filled in by Refresh).
+    frame.tabHint = Label("GameFontHighlight", 22 + #tabs * 142 - 2, -563, 80, "")
+    frame.tabHint:SetHeight(26)
+    frame.tabHint:SetJustifyV("MIDDLE")
     frame.search = Button("Search", 222, -134, 294, 30, function() SearchInput() end, "search", "toolbar")
     frame.search.text:SetJustifyH("LEFT")
+    frame.search.text:SetFontObject(GameFontHighlightMedium)
+    -- The field is drawn like the keyboard's text strip: the same skin art sits just below the button.
+    frame.search:SetFrameLevel(frame:GetFrameLevel() + 4)
+    frame.search.inset = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    -- Sized explicitly: the skin reads the height to size its art, before any layout pass.
+    frame.search.inset:SetPoint("TOPLEFT", frame.search, "TOPLEFT")
+    frame.search.inset:SetSize(294, 30)
+    frame.search.inset:SetFrameLevel(frame:GetFrameLevel() + 3)
+    -- The Square glyph is a real icon at the left of the field, not inline text, so it can be large
+    -- (bound in Refresh, so it follows controller changes).
+    frame.search.glyphNative = ns.Glyphs.CreateNativeIcon(frame.search) or nil
+    if frame.search.glyphNative then
+        frame.search.glyphNative:SetSize(28, 27)
+        frame.search.glyphNative:SetPoint("LEFT", 6, 0)
+    end
+    frame.search.glyphIcon = frame.search:CreateTexture(nil, "OVERLAY")
+    frame.search.glyphIcon:SetSize(26, 26)
+    frame.search.glyphIcon:SetPoint("LEFT", 7, 0)
+    frame.search.glyphIcon:Hide()
     frame.refresh = Button("Search", 642, -134, 112, 30, function()
         if filterMode then filterMode, page = false, 1 end
-        if tab == 4 then Data.Owned() elseif tab == 1 then Data.Search(Data.query, Data.page) else Refresh() end
+        if tab == 3 then Data.Owned() elseif tab == 1 then Data.Search(Data.query, Data.page) else Refresh() end
     end, "primary", "toolbar")
     frame.filter = Button("Filter", 528, -134, 102, 30, function() ToggleFilters() end, "secondary", "toolbar")
     -- Shortcut keys carry their controller glyph, as on the keyboard.
@@ -367,17 +415,14 @@ local function Create()
     frame.quantityHeader:SetJustifyH("RIGHT")
     frame.priceHeader = Label("GameFontNormalSmall", 230, -182, 130, "Price")
     frame.nameHeader = Label("GameFontNormalSmall", 400, -182, 258, "Name")
-    frame.detailHeading = Label("GameFontNormalSmall", 794, -106, 270, "ITEM PREVIEW")
-    frame.detailTitle = Label("GameFontNormalLarge", 794, -132, 272)
-    frame.detailTitle:SetHeight(42)
+    -- The preview pane holds only the item's tooltip and its quantity. Its icon stands in for the
+    -- tooltip when the client cannot build one for the item.
     frame.detailIcon = frame:CreateTexture(nil, "OVERLAY")
-    frame.detailIcon:SetPoint("TOPLEFT", 794, -132)
-    frame.detailIcon:SetSize(40,40)
-    frame.detail = Label("GameFontHighlightSmall", 794, -184, 272)
-    frame.detail:SetJustifyV("TOP")
-    frame.detail:SetHeight(110)
-    frame.detailAction = Label("GameFontNormalSmall", 794, -510, 272)
-    frame.detailAction:SetHeight(24)
+    frame.detailIcon:SetPoint("TOPLEFT", 798, -112)
+    frame.detailIcon:SetSize(48, 48)
+    frame.detailIcon:Hide()
+    frame.previewQuantity = Label("GameFontNormalLarge", 794, -170, 272)
+    frame.previewQuantity:SetHeight(28)
     frame.emptyTitle = Label("GameFontNormalLarge", 244, -286, 488)
     frame.emptyTitle:SetJustifyH("CENTER")
     frame.emptyHelp = Label("GameFontHighlightSmall", 254, -318, 468)
@@ -400,6 +445,13 @@ local function Create()
         b.level:SetPoint("LEFT", 384, 0)
         b.level:SetWidth(54)
         b.level:SetJustifyH("RIGHT")
+        -- Second line under the name: "Sold" and when the gold reaches the mailbox.
+        b.note = b:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        b.note:SetPoint("LEFT", 180, -8)
+        b.note:SetWidth(262)
+        b.note:SetJustifyH("LEFT")
+        b.note:SetWordWrap(false)
+        b.note:Hide()
         buttons[i] = b
     end
     -- Sortable column headers, as in Blizzard's results list: press one to sort by it, press it
@@ -446,17 +498,15 @@ local function Create()
     frame.filterNote = Label("GameFontDisableSmall", 370, -448, 206, "")
     frame.previous = Button("Previous", 222, -510, 94, 26, function() Auction.Page(-1) end, "secondary", "paging")
     frame.next = Button("Next", 326, -510, 94, 26, function() Auction.Page(1) end, "secondary", "paging")
-    frame.native = Button("Open native window", 898, -558, 178, 34, function() Auction.Close() end, "secondary", "utility")
+    frame.native = Button("Close auction house", 898, -558, 178, 34, function() Auction.Exit() end, "secondary", "utility")
     frame.page = Label("GameFontDisableSmall", 434, -518, 322)
     -- frame.note = Label("GameFontDisableSmall", 30, -638, 1030,
     --     "Select a listing to buy or bid. Sell lists auctionable bag items. Every transaction requires confirmation.")
-    local legend = CreateFrame("Frame", nil, frame)
-    legend:SetPoint("TOPLEFT", 28, -610)
-    legend:SetSize(1040, 20)
-    -- Shortcuts that belong to a button are shown on that button (Search, tabs, paging, Back...).
-    -- The footer keeps only the inputs that have no button of their own.
-    Prompt(legend, "PAD1", "Select", 0)
-    frame.padHint = Label("GameFontHighlightSmall", 150, -614, 300, "")
+    -- The same legend bar as the keyboard's. Shortcuts that belong to a button are shown on that
+    -- button (Search, tabs, paging, Back...); the bar keeps only inputs with no button of their own.
+    -- It runs flush along the bottom inner edge of the border.
+    frame.legendBar = ns.Glyphs.CreateLegendBar(frame)
+    ns.Skin.DockBar(frame.legendBar, frame, "BOTTOM")
     tooltip = CreateFrame("GameTooltip", "EBGAuctionItemTooltip", frame, "GameTooltipTemplate")
     tooltip:SetClampedToScreen(true)
     frame:SetScript("OnGamePadButtonDown", function(self, key)
@@ -500,13 +550,13 @@ local function Create()
         elseif key == "PADRSHOULDER" then SwitchTab(tab % #tabs + 1)
         elseif key == "PAD1" then
             local b = controls[focus]
-            releaseAction = b and { key, function() Style.Press(b) b.action() end } or nil
+            releaseAction = b and not b.disabled and { key, function() Style.Press(b) b.action() end } or nil
         elseif key == "PAD3" then releaseAction = { key, SearchInput }
         elseif key == "PAD4" then releaseAction = { key, frame.refresh.action }
         elseif key == "PAD2" then
             releaseAction = { key, function()
                 if filterMode then filterMode, page = false, 1 Refresh()
-                elseif tab == 1 and Data.mode == "details" then Data.Search(Data.query) else Auction.Close() end
+                elseif tab == 1 and Data.mode == "details" then Data.Search(Data.query) else Auction.Exit() end
             end }
         elseif PASS_THROUGH[key] then consumed[key] = nil self:SetPropagateKeyboardInput(true) end
         -- Every other button is swallowed: anything that reached the game here would act on
@@ -538,9 +588,7 @@ Refresh = function()
     elseif tab == 2 then
         rows = ns.Inventory.Sellable()
         for _, r in ipairs(rows) do r.summary = "Select to set quantity, price, and duration. Review the deposit before posting." end
-    elseif tab == 3 then
-        for _, text in ipairs(ns.db.auctionRecent or {}) do rows[#rows + 1] = { name = text, recent = true, summary = "Select to search again." } end
-    elseif (tab == 4 and Data.mode == "owned") or (tab == 1 and Data.mode ~= "owned") then rows = Data.rows end
+    elseif (tab == 3 and Data.mode == "owned") or (tab == 1 and Data.mode ~= "owned") then rows = Data.rows end
     if pendingPage and not Data.busy then page, pendingPage = pendingPage, nil end
     page = math.max(1, math.min(page, math.max(1, math.ceil(#rows / 7))))
     controls = {}
@@ -548,6 +596,7 @@ Refresh = function()
     frame.back:SetShown(filterMode or details)
     if filterMode or details then controls[#controls + 1] = frame.back end
     frame.search:SetShown(tab == 1 and not filterMode)
+    frame.search.inset:SetShown(frame.search:IsShown())
     frame.filter:SetShown(tab == 1 and not details)
     frame.refresh:SetShown(not details and not filterMode)
     if frame.search:IsShown() then controls[#controls + 1] = frame.search end
@@ -563,7 +612,7 @@ Refresh = function()
     frame.sidebarHelp:SetText(details and "You are viewing listings for one item.\n\nUse < Results to return to your search.\n\nPrices and quantities belong to each listing." or
         (filterMode and "Change the options you need, then Apply search.\n\nFilters affect auction searches. Level 0 means any level." or
         (tab == 2 and "Auctionable items in your bags.\n\nChoose an item, set quantity and price, then review its deposit before posting." or
-        (tab == 3 and "Your recent searches.\n\nChoose a name to run that search again." or "Your listed auctions.\n\nSelect a listing to review cancellation and any fee."))))
+        "Your listed auctions.\n\nSelect a listing to review cancellation and any fee.\n\nSold auctions are greyed out until their gold reaches your mailbox.")))
     -- With a category picked the list shows only its own path and its subcategories; the Back
     -- button below the list steps up one level. Nothing picked shows the top level.
     local picked = ns.AuctionFilters.category
@@ -624,17 +673,16 @@ Refresh = function()
     end
     if frame.browseReturn:IsShown() then controls[#controls + 1] = frame.browseReturn end
     frame.categorySummary:SetShown(browsing)
-    frame.padHint:SetText(ns.Glyphs.Legend("PADDPAD", "Navigate", 16))
+    frame.legendBar:SetItems({ { "PAD1", "Select" }, { "PADDPAD", "Navigate" } })
     -- Glyphs on the buttons their controller shortcut presses.
     local function Mark(b, button) if b.glyphButton ~= button then Style.Glyph(b, button) end end
-    for i, b in ipairs(frame.tabButtons) do
-        Mark(b, (i == (tab - 2) % #tabs + 1 and "PADLSHOULDER") or (i == tab % #tabs + 1 and "PADRSHOULDER") or nil)
-    end
+    -- LB / RB switch tabs: shown once, beside the tab row, so the tabs themselves never shift.
+    frame.tabHint:SetText(ns.Glyphs.Inline("PADLSHOULDER", 26) .. " " .. ns.Glyphs.Inline("PADRSHOULDER", 26))
     Mark(frame.previous, "PADLTRIGGER")
     Mark(frame.next, "PADRTRIGGER")
     -- B closes the browser (showing Blizzard's window) unless a Back button is on screen.
     Mark(frame.native, not (filterMode or details) and "PAD2" or nil)
-    frame.categorySummary:SetText(ns.Glyphs.Legend("PADDRIGHT", "Results", 16) .. "\n" .. ns.Glyphs.Legend({ "PADLTRIGGER", "PADRTRIGGER" }, "Result pages", 16))
+    frame.categorySummary:SetText(ns.Glyphs.Legend("PADDRIGHT", "Results") .. "\n" .. ns.Glyphs.Legend({ "PADLTRIGGER", "PADRTRIGGER" }, "Result pages"))
     -- Sort headers: browse results on the modern auction house, which sorts on the server.
     local sortable = tab == 1 and not filterMode and not details and Data.backend == "modern"
     local showLevel = false
@@ -718,14 +766,26 @@ Refresh = function()
         if c == oldFilter then focus = #controls end
     end
     firstResult = #controls + 1
-    frame.search.placeholder = Data.query == ""
-    frame.search.text:SetText(Data.query == "" and (ns.Glyphs.Legend("PAD3", "Search by item name...", 16)) or ns.Glyphs.Legend("PAD3", Escape(Data.query), 16))
-    frame.search.text:ClearAllPoints()
-    frame.search.text:SetPoint("LEFT", 12, 0)
-    frame.search.text:SetWidth(270)
-    frame.search.text:SetWordWrap(false)
-    local status = (tab == 2 and (#rows .. " auctionable item types - select to sell")) or
-        (tab == 3 and (#rows == 0 and "Your searches will appear here." or "Choose a recent search")) or Data.message or "Ready"
+    local search = frame.search
+    search.placeholder = Data.query == ""
+    -- Same art as the keyboard's text strip; re-applied only when the skin choice changes.
+    local skinKey = tostring(ns.db and ns.db.skin) .. "/" .. tostring(ns.db and ns.db.entryBox)
+    if search.skinKey ~= skinKey and ns.Skin and ns.Skin.Inset then
+        search.skinKey = skinKey
+        search.insetKind = ns.Skin.Inset(search.inset)
+    end
+    -- Square: a native icon when the client has one, else the glyph atlas, else inline text.
+    local hasGlyph = search.glyphNative and ns.Glyphs.BindNativeIcon(search.glyphNative, "PAD3")
+    if search.glyphNative then search.glyphNative:SetShown(hasGlyph and true or false) end
+    if hasGlyph then search.glyphIcon:Hide()
+    else hasGlyph = ns.Glyphs.Apply(search.glyphIcon, "PAD3") end
+    local text = Data.query == "" and "Search by item name..." or Escape(Data.query)
+    search.text:SetText(hasGlyph and text or ns.Glyphs.Legend("PAD3", text, 26))
+    search.text:ClearAllPoints()
+    search.text:SetPoint("LEFT", hasGlyph and 40 or 12, 0)
+    search.text:SetWidth(hasGlyph and 242 or 270)
+    search.text:SetWordWrap(false)
+    local status = (tab == 2 and (#rows .. " auctionable item types - select to sell")) or Data.message or "Ready"
     if InCombatLockdown() then status = "Combat: auction controls paused." end
     if filterMode and not InCombatLockdown() then status = "Choose filters, then Apply and search. Level 0 means any." end
     frame.status:SetText(status)
@@ -736,28 +796,28 @@ Refresh = function()
     frame.breadcrumb:SetWidth((filterMode or details) and 730 or 850)
     frame.breadcrumb:SetText(Escape(path))
     frame.viewTitle:SetText(filterMode and "Search filters" or (details and ("Listings: " .. Escape(Data.itemName or "Item")) or
-        ({"Browse auctions", "Sell an item", "Recent searches", "Your auctions"})[tab]))
+        ({"Browse auctions", "Sell an item", "Your auctions"})[tab]))
     local hint = filterMode and "Choose options, then apply your search" or
         (details and "Compare individual listings • Back returns to your search" or
         (tab == 1 and (Data.query ~= "" and ('Results for "' .. Escape(Data.query) .. '"') or "Browse a category or search by item name") or
-        ({"", "Choose an item to set price, quantity, and duration", "Select a search to run it again", "Review your active and sold listings"})[tab]))
+        ({"", "Choose an item to set price, quantity, and duration", "Review your active and sold listings"})[tab]))
     frame.viewHint:SetText(hint)
     frame.emptyTitle:SetShown(#rows == 0 and not filterMode)
     frame.emptyHelp:SetShown(#rows == 0 and not filterMode)
     frame.emptyTitle:SetText(Data.busy and "Searching auctions..." or (Data.mode == "invalid" and tab == 1 and "Search unavailable" or
         (Data.message == "No results." and tab == 1 and "No auctions found" or (Data.pending and tab == 1 and "Ready to search" or "Start browsing"))))
-    frame.emptyHelp:SetText(tab == 2 and "Unlocked, auctionable items in your bags will appear here." or (tab == 3 and "Search for an item to add it to this list." or
-        (tab == 4 and "No auctions to display." or (Data.busy and "Results will appear here when the auction house responds." or
+    frame.emptyHelp:SetText(tab == 2 and "Unlocked, auctionable items in your bags will appear here." or
+        (tab == 3 and "No auctions to display." or (Data.busy and "Results will appear here when the auction house responds." or
         (Data.mode == "invalid" and Data.message or (Data.pending and ("Press Search to list auctions in " .. Escape(CategoryPath()) .. ".") or
-        "Choose a category on the left, or enter an item name above."))))))
-    frame.quantityHeader:SetText(tab == 3 and "" or (tab == 2 and "Carried" or
-        (tab == 4 and "Listed" or (Data.backend == "legacy" and "Stack" or "Available"))))
+        "Choose a category on the left, or enter an item name above.")))))
+    frame.quantityHeader:SetText(tab == 2 and "Carried" or
+        (tab == 3 and "Listed" or (Data.backend == "legacy" and "Stack" or "Available")))
     -- Plain labels where the list cannot be re-sorted; the sort headers replace them otherwise.
-    frame.priceHeader:SetShown(not filterMode and not sortable and (tab == 1 or tab == 4))
+    frame.priceHeader:SetShown(not filterMode and not sortable and (tab == 1 or tab == 3))
     frame.quantityHeader:SetShown(not filterMode)
     frame.nameHeader:SetShown(not filterMode and not sortable)
     frame.nameHeader:ClearAllPoints()
-    frame.nameHeader:SetPoint("TOPLEFT", (tab == 2 or tab == 3) and 232 or 400, -182)
+    frame.nameHeader:SetPoint("TOPLEFT", tab == 2 and 232 or 400, -182)
     for i, b in ipairs(buttons) do
         local item = rows[(page - 1) * 7 + i]
         b.item = item
@@ -772,23 +832,37 @@ Refresh = function()
             b.text:SetWordWrap(false)
             b.text:SetText(Escape(item.name))
             b.icon:SetTexture(item.icon or 134400)
-            b.price:SetText(item.price and Money(item.price) or ((tab == 1 or tab == 4) and "No buyout" or ""))
+            b.price:SetText(item.price and Money(item.price) or ((tab == 1 or tab == 3) and "No buyout" or ""))
             b.quantity:SetText(Quantity(item.count))
             if filterMode then
                 b.text:ClearAllPoints()
                 b.text:SetPoint("LEFT", 12, 0)
                 b.text:SetWidth(516)
             end
-            if tab == 2 or tab == 3 then
+            if tab == 2 then
                 b.text:ClearAllPoints()
-                b.text:SetPoint("LEFT", tab == 2 and 44 or 12, 0)
-                b.text:SetWidth(tab == 2 and 390 or 516)
+                b.text:SetPoint("LEFT", 44, 0)
+                b.text:SetWidth(390)
                 b.icon:ClearAllPoints()
                 b.icon:SetPoint("LEFT", 10, 0)
             else b.icon:ClearAllPoints() b.icon:SetPoint("LEFT", 146, 0) end
+            -- A sold auction stays listed, greyed out like Blizzard's, with the time until its gold
+            -- reaches the mailbox under the name.
+            b.sold = tab == 3 and item.sold or nil
+            if b.sold then
+                b.text:ClearAllPoints()
+                b.text:SetPoint("LEFT", 180, 7)
+                b.note:SetText(SoldText(item))
+            end
+            b.note:SetShown(b.sold and true or false)
+            b.icon:SetDesaturated(b.sold and true or false)
+            b.icon:SetAlpha(b.sold and 0.6 or 1)
+            local shade = b.sold and 0.5 or 1
+            b.price:SetTextColor(shade, shade, shade)
+            b.quantity:SetTextColor(shade, shade, shade)
             b.role = filterMode and "option" or "row"
-            b.icon:SetShown(not filterMode and tab ~= 3)
-            b.price:SetShown(not filterMode and (tab == 1 or tab == 4))
+            b.icon:SetShown(not filterMode)
+            b.price:SetShown(not filterMode and (tab == 1 or tab == 3))
             b.quantity:SetShown(not filterMode)
             b.action = function() Activate(item) end
             controls[#controls + 1] = b
@@ -800,6 +874,10 @@ Refresh = function()
     frame.previous:SetShown(not filterMode)
     frame.next:SetShown(not filterMode)
     frame.page:SetShown(not filterMode)
+    -- Paging keys are greyed out when there is no page in that direction (the same tests as Auction.Page).
+    local pages = math.max(1, math.ceil(#rows / 7))
+    frame.previous.disabled = Data.busy or not (page > 1 or (tab == 1 and Data.backend == "legacy" and (Data.page or 0) > 0))
+    frame.next.disabled = Data.busy or not (page < pages or (tab == 1 and Data.more))
     if not filterMode then
         controls[#controls + 1] = frame.previous
         controls[#controls + 1] = frame.next
@@ -807,6 +885,14 @@ Refresh = function()
     controls[#controls + 1] = frame.native
     frame.page:SetText(("Page %d / %d%s"):format(page, math.max(1, math.ceil(#rows / 7)),
         tab == 1 and not filterMode and Data.more and " - Next loads more" or ""))
+    -- When a search finishes, focus moves to the first result (if any), ready for A. A sort header
+    -- that was just pressed keeps focus, so it can be pressed again to reverse.
+    local justLoaded = wasBusy and not Data.busy
+    wasBusy = Data.busy
+    local onHeader = controls[focus] and controls[focus].group == "header"
+    if justLoaded and not filterMode and not onHeader and (tab == 1 or tab == 3) and lastResult >= firstResult then
+        focus = firstResult
+    end
     Select(focus)
 end
 Activate = function(item)
@@ -814,17 +900,14 @@ Activate = function(item)
     elseif tab == 2 then
         tooltip:Hide()
         ns.AuctionTransactions.Open("sell",item)
-    elseif tab == 3 then
-        ns.AuctionFilters.category = nil
-        if Data.Search(item.name) then tab, page, focus = 1, 1, firstResult end
-        Refresh()
     elseif tab == 1 and Data.mode == "browse" and item.itemKey then
         if Data.Details(item) then page, focus = 1, firstResult end
         Refresh()
     elseif tab == 1 and Data.mode == "details" then
         tooltip:Hide()
         ns.AuctionTransactions.Open("buy",item)
-    elseif tab == 4 then
+    elseif tab == 3 and not item.sold then
+        -- A sold auction cannot be cancelled; it only waits for its gold to be mailed.
         tooltip:Hide()
         ns.AuctionTransactions.Open("cancel",item)
     end
@@ -834,7 +917,7 @@ SwitchTab = function(index)
     pendingPage = nil
     filterMode = false
     tab, page, focus = index, 1, index
-    if tab == 4 then Data.Owned()
+    if tab == 3 then Data.Owned()
     elseif tab == 1 and Data.mode == "owned" then Data.Search(Data.query) end
     Refresh()
 end
@@ -879,8 +962,9 @@ ToggleFilters = function()
     for i, c in ipairs(controls) do if c == target then Select(i) break end end
 end
 EditLevel = function(key)
-    local buffer = ns.Input.NewBuffer(key == "minLevel" and "Minimum level" or "Maximum level", tostring(ns.AuctionFilters[key]), function(text)
-        local level = tonumber(text)
+    -- Entry starts at 0 (= any level); the first digit typed replaces it.
+    local buffer = ns.Input.NewBuffer(key == "minLevel" and "Minimum level" or "Maximum level", "0", function(text)
+        local level = tonumber(text == "" and "0" or text)
         local f = ns.AuctionFilters
         if not level or level < 0 or level > 999 or level ~= math.floor(level) then ns.Print("Enter a whole level from 0 to 999.") return end
         if (key == "minLevel" and f.maxLevel > 0 and level > f.maxLevel) or (key == "maxLevel" and level > 0 and level < f.minLevel) then
@@ -928,7 +1012,8 @@ function Auction.Open()
     if not Data.backend then ns.Print("No supported auction query API was found on this client.") return end
     if not frame then Create() end
     if #categories == 0 then categories = ns.AuctionFilters.Categories() ns.AuctionFilters.Reset() end
-    closing = false
+    opened = opened + 1
+    closing, exiting = false, false
     frame:SetAlpha(1)
     frame:EnableMouse(true)
     PlaceOverNative()
@@ -981,6 +1066,10 @@ listener:SetScript("OnUpdate", function(_, dt)
             Capture(not KeyboardOpen())
             SetNativeHidden(true)
             ns.AuctionTradeUI.SyncBindings()
+            -- Keep the "gold arrives in ..." countdowns on sold auctions current.
+            for _, b in ipairs(buttons) do
+                if b.sold and b.item and b:IsShown() then b.note:SetText(SoldText(b.item)) end
+            end
         end
     end
     if not pad or not Data.active or not ns.db or not ns.db.enabled then if launcher then launcher:Hide() end return end

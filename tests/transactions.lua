@@ -148,6 +148,27 @@ check(T.Confirm() and calls[#calls][1]=="cancelAuction" and calls[#calls][2]==44
 Emit("AUCTION_CANCELED",444)
 check(T.current.phase=="done","cancellation acknowledged")
 reset()
+-- Clients that confirm a cancellation another way: the system message, or the auction leaving your list.
+T.Open("cancel",{name="Silk",auctionID=445})
+T.Review() T.Confirm()
+Emit("AUCTION_CANCELED",999)
+check(T.current.phase=="sending","another auction's cancellation is not this one")
+ERR_AUCTION_REMOVED="Auction cancelled."
+Emit("CHAT_MSG_SYSTEM","Auction cancelled.")
+check(T.current.phase=="done","cancellation confirmed by the system message")
+reset()
+T.Open("cancel",{name="Silk",auctionID=446})
+T.Review() T.Confirm()
+local ownedNum,ownedInfo=api.GetNumOwnedAuctions,api.GetOwnedAuctionInfo
+api.GetNumOwnedAuctions=function() return 1 end
+api.GetOwnedAuctionInfo=function() return {auctionID=446} end
+Emit("OWNED_AUCTIONS_UPDATED")
+check(T.current.phase=="sending","still listed: not yet cancelled")
+api.GetOwnedAuctionInfo=function() return {auctionID=1} end
+Emit("OWNED_AUCTIONS_UPDATED")
+check(T.current.phase=="done","cancellation confirmed by the refreshed auction list")
+api.GetNumOwnedAuctions,api.GetOwnedAuctionInfo=ownedNum,ownedInfo
+reset()
 T.Open("sell",item) T.Update("buyout",500) T.Review() T.Confirm()
 Emit("AUCTION_HOUSE_SHOW_ERROR",1)
 check(T.current.phase=="error" and not T.Confirm(),"server error stops repeated submission")

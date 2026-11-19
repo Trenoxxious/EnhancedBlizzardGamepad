@@ -53,6 +53,8 @@ function Buffer:SetText(text)
     return true
 end
 function Buffer:Insert(text)
+    -- A number field showing just "0" is replaced by the first digit typed, not appended to.
+    if self.numeric and self.text == "0" and text:match("^%d") then self.text, self.pos = "", 0 end
     local pos = self.pos + #text
     if self:SetText(self.text:sub(1, self.pos) .. text .. self.text:sub(self.pos + 1)) then self:SetCursorPosition(pos) end
 end

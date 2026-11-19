@@ -122,6 +122,10 @@ check(native:GetAlpha()==0 and native:IsShown(),"native auction window is faded,
 ns.Auction.Close(true)
 check(native:GetAlpha()==1,"closing the browser restores the native window")
 ns.Auction.Open()
+ns.Auction.Exit()
+ns.Auction.Open()
+Tick(1) Tick(1)
+check(ns.Auction.frame:IsShown() and native:GetAlpha()==0,"leaving and quickly reopening keeps the new browser open")
 local available
 for _,f in ipairs(frames) do
     if f.item and f.item.itemKey and f.quantity and f:IsVisible() then available=f.quantity:GetText() end
@@ -158,7 +162,24 @@ check(rowButton.role=="row" and rowButton.focusRing:IsShown(),"result focus uses
 ns.Auction.frame.tabButtons[2]:GetScript("OnClick")(ns.Auction.frame.tabButtons[2])
 check(not ns.Auction.frame.categoryButtons[1]:IsShown() and ns.Auction.frame.sidebarHelp:IsShown(),"bag lookup does not imply category filters apply")
 check(ns.Auction.frame.viewTitle:GetText()=="Sell an item","sell context is explicit")
+check(#ns.Auction.frame.tabButtons==3,"Buy, Sell and Auctions tabs only (no Recent)")
+-- A sold auction of yours is listed greyed out with its mail countdown, and cannot be cancelled.
+local api=C_AuctionHouse
+local oldNum,oldInfo=api.GetNumOwnedAuctions,api.GetOwnedAuctionInfo
+api.GetNumOwnedAuctions=function() return 1 end
+api.GetOwnedAuctionInfo=function() return {itemKey={itemID=9,itemLevel=0,itemSuffix=0,battlePetSpeciesID=0},itemLink="[Ore]",
+    quantity=5,buyoutAmount=900,auctionID=77,status=1,timeLeftSeconds=3000} end
+ns.Auction.frame.tabButtons[3]:GetScript("OnClick")(ns.Auction.frame.tabButtons[3])
+Emit("OWNED_AUCTIONS_UPDATED")
+local soldRow
+for _,b in ipairs(frames) do if b.item and b.item.auctionID==77 and b:IsVisible() then soldRow=b end end
+check(soldRow and soldRow.sold and soldRow.note:IsShown() and soldRow.note:GetText():find("mailbox",1,true),"sold auction is greyed with its mail time")
+soldRow.action()
+check(not (ns.AuctionTransactions.current and ns.AuctionTransactions.current.kind=="cancel"),"a sold auction does not open cancellation")
+check(ns.Auction.frame.previous.disabled and ns.Auction.frame.next.disabled,"paging keys are greyed out with a single page")
+api.GetNumOwnedAuctions,api.GetOwnedAuctionInfo=oldNum,oldInfo
 ns.Auction.frame.tabButtons[1]:GetScript("OnClick")(ns.Auction.frame.tabButtons[1])
+Emit("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED") -- leaving Auctions re-runs the browse search
 ns.Auction.frame.filter:GetScript("OnClick")(ns.Auction.frame.filter)
 check(ns.Auction.frame.status:GetText():find("Choose filters",1,true),"controller filter page opens")
 check(ns.Auction.frame.viewTitle:GetText()=="Search filters" and ns.Auction.frame.back:IsShown(),"filters show distinct context and back affordance")

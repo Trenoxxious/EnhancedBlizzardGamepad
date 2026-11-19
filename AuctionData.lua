@@ -53,14 +53,6 @@ local function Begin(mode)
     Data.message, Data.rows, Data.more = "Searching...", {}, false
     Changed()
 end
-local function Remember(text)
-    if not ns.db or text == "" then return end
-    local recent = ns.db.auctionRecent or {}
-    for i = #recent, 1, -1 do if recent[i] == text then table.remove(recent, i) end end
-    table.insert(recent, 1, text)
-    while #recent > 8 do table.remove(recent) end
-    ns.db.auctionRecent = recent
-end
 function Data.Search(text, page)
     if not Data.Ready() then
         -- A changed filter/search must not leave unrelated old rows visible.
@@ -80,7 +72,6 @@ function Data.Search(text, page)
         local usable, exact, classes = ns.AuctionFilters.Legacy()
         ok = Call(QueryAuctionItems, text, ns.AuctionFilters.minLevel, ns.AuctionFilters.maxLevel, Data.page, usable, nil, false, exact, classes)
     end
-    if ok then Remember(text) end
     return ok
 end
 function Data.Details(row)
@@ -153,11 +144,16 @@ local function ModernRows()
             local r = api.GetOwnedAuctionInfo(i)
             if r then
                 local info = api.GetItemKeyInfo(r.itemKey)
+                -- Sold auctions stay in the list until their gold is mailed; timeLeftSeconds then
+                -- counts down to that delivery.
+                local sold = r.status == (Enum and Enum.AuctionStatus and Enum.AuctionStatus.Sold or 1)
                 rows[#rows + 1] = { name = ItemName(r.itemLink, info and info.itemName), link = r.itemLink,
                     itemID = r.itemKey.itemID, icon = info and info.iconFileID, quality = info and info.quality,
-                    count = r.quantity, price = r.buyoutAmount, priceLabel = "Buyout", bid = r.bidAmount,
-                    auctionID = r.auctionID, status = r.status,
-                    summary = "Your auction. Select to review cancellation and any fee.", identity = r.auctionID }
+                    count = r.quantity, price = r.buyoutAmount, priceLabel = sold and "Sold for" or "Buyout", bid = r.bidAmount,
+                    auctionID = r.auctionID, status = r.status, sold = sold or nil,
+                    mailIn = sold and r.timeLeftSeconds or nil, readAt = GetTime(),
+                    summary = sold and "This auction has sold. Its gold is being sent to your mailbox." or
+                        "Your auction. Select to review cancellation and any fee.", identity = r.auctionID }
             end
         end
     end
@@ -169,12 +165,15 @@ local function LegacyRows()
     Data.more = kind == "list" and (Data.page + 1) * 50 < (total or count)
     local rows = {}
     for i = 1, count do
-        local name, icon, quantity, quality, _, _, _, minBid, _, buyout, bid, _, _, owner = GetAuctionItemInfo(kind, i)
+        local name, icon, quantity, quality, _, _, _, minBid, _, buyout, bid, _, _, owner, _, saleStatus = GetAuctionItemInfo(kind, i)
         local link = GetAuctionItemLink and GetAuctionItemLink(kind, i)
+        -- The old auction house marks a sold listing of yours with saleStatus 1; it gives no mail time.
+        local sold = kind == "owner" and saleStatus == 1 or nil
         rows[#rows + 1] = { name = name or ItemName(link), link = link, icon = icon, quality = quality,
             count = quantity, price = buyout and buyout > 0 and buyout or nil, priceLabel = "Stack buyout",
-            bid = bid and bid > 0 and bid or minBid,
-            summary = "Seller: " .. (owner or "unknown"), identity = kind .. ":" .. i .. ":" .. (link or name or "") }
+            bid = bid and bid > 0 and bid or minBid, sold = sold,
+            summary = sold and "This auction has sold. Its gold is being sent to your mailbox." or ("Seller: " .. (owner or "unknown")),
+            identity = kind .. ":" .. i .. ":" .. (link or name or "") }
     end
     return rows
 end
@@ -221,7 +220,7 @@ events:SetScript("OnEvent", function(_, event, key)
     if event == "AUCTION_HOUSE_SHOW" then
         Data.active, Data.backend = true, Data.Detect()
         Data.busy, Data.mode, Data.rows, Data.searched, Data.pending = false, "browse", {}, false, false
-        Data.message = "Type a name or pick a category, then Search."
+        Data.message = "Type a name or pick a category to the left to view listed items."
         Data.HookQueries()
         if ns.Auction then ns.Auction.OnVisit() end
         return

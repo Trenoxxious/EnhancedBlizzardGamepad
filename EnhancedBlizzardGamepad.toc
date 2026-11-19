@@ -21,5 +21,5 @@ AuctionTransactions.lua
 AuctionTradeUI.lua
 AuctionHouse.lua
 LFG.lua
+Options.lua
 Inspector.lua
-Bindings.xml

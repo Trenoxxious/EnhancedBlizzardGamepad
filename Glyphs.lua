@@ -46,7 +46,7 @@ local TEXT = {
     PS = { PAD1 = "Cross", PAD2 = "Circle", PAD3 = "Square", PAD4 = "Tri", PADLSHOULDER = "L1", PADRSHOULDER = "R1", PADLTRIGGER = "L2", PADRTRIGGER = "R2", PADFORWARD = "Options", PADBACK = "Share", PADLSTICK = "L3", PADRSTICK = "R3", PADSOCIAL = "Touchpad" },
     XB = { PAD1 = "A", PAD2 = "B", PAD3 = "X", PAD4 = "Y", PADLSHOULDER = "LB", PADRSHOULDER = "RB", PADLTRIGGER = "LT", PADRTRIGGER = "RT", PADFORWARD = "Menu", PADBACK = "View", PADLSTICK = "LS", PADRSTICK = "RS", PADSOCIAL = "Share" },
 }
-local TEXT_COMMON = { PADDUP = "Up", PADDDOWN = "Down", PADDLEFT = "Left", PADDRIGHT = "Right" }
+local TEXT_COMMON = { PADDUP = "Up", PADDDOWN = "Down", PADDLEFT = "Left", PADDRIGHT = "Right", PADDPAD = "D-pad" }
 
 local function AtlasExists(name)
     return C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(name) ~= nil
@@ -157,7 +157,7 @@ end
 -- The button drawn inside text (an inline atlas), for legends and hints; the name if no atlas exists.
 -- "PADDPAD" means the D-pad as a whole.
 function Glyphs.Inline(button, size)
-    size = size or 18
+    size = size or 22
     local atlas = button ~= "PADDPAD" and Glyphs.Atlas(button, "Normal")
     if atlas then return ("|A:%s:%d:%d|a"):format(atlas, size, size) end
     -- Otherwise use whatever Blizzard's own icon frame draws for this button.
@@ -325,6 +325,105 @@ function Glyphs.Drawn(button)
     end
     drawnCache[button] = found
     return found or nil
+end
+-- A legend bar drawn the way the keyboard's is (and like Blizzard's gamepad legend): a dark strip
+-- with gold rules and centred entries, each a Blizzard prompt (icon + text) where available.
+-- bar:SetItems({ { button, label [, button2] }, ... })
+local LEGEND_H = 22
+function Glyphs.CreateLegendBar(parent)
+    local bar = CreateFrame("Frame", nil, parent)
+    bar:SetHeight(LEGEND_H + 16)
+    local bg = bar:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0, 0, 0, 0.62)
+    for _, edge in ipairs({ { "TOP", 0.9 }, { "BOTTOM", 0.6 } }) do
+        local line = bar:CreateTexture(nil, "BORDER")
+        line:SetPoint(edge[1] .. "LEFT", 0, 0)
+        line:SetPoint(edge[1] .. "RIGHT", 0, 0)
+        line:SetHeight(1)
+        line:SetColorTexture(0.55, 0.45, 0.22, edge[2])
+    end
+    local strip = CreateFrame("Frame", nil, bar)
+    strip:SetPoint("CENTER", 0, 0)
+    -- Room kept free at the bar's left end (for a key such as Back drawn inside the bar); the
+    -- entries are centred in the rest.
+    function bar:SetContentLeft(px)
+        strip:ClearAllPoints()
+        strip:SetPoint("CENTER", (px or 0) / 2, 0)
+    end
+    strip:SetHeight(LEGEND_H)
+    strip:SetFrameLevel(bar:GetFrameLevel() + 2)
+    local entries = {}
+    local function Entry(i)
+        if entries[i] then return entries[i] end
+        local e = CreateFrame("Frame", nil, strip)
+        e:SetHeight(LEGEND_H)
+        e.prompt = Glyphs.CreateNativePrompt(e)
+        if e.prompt then e.prompt:SetPoint("LEFT", 0, 0) end
+        e.native = Glyphs.CreateNativeIcon(e)
+        if e.native then
+            e.native:SetSize(20, 19)
+            e.native:SetPoint("LEFT", 0, 0)
+            e.native2 = Glyphs.CreateNativeIcon(e)
+            if e.native2 then e.native2:SetSize(20, 19) e.native2:SetPoint("LEFT", e.native, "RIGHT", -2, 0) end
+        end
+        e.icon = e:CreateTexture(nil, "ARTWORK")
+        e.icon:SetSize(20, 20)
+        e.icon:SetPoint("LEFT", 0, 0)
+        e.icon2 = e:CreateTexture(nil, "ARTWORK")
+        e.icon2:SetSize(20, 20)
+        e.icon2:SetPoint("LEFT", e.icon, "RIGHT", -2, 0)
+        e.key = e:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        e.key:SetPoint("LEFT", 0, 0)
+        e.label = e:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        entries[i] = e
+        return e
+    end
+    function bar:SetItems(items)
+        local total, gap = 0, 14
+        for i, item in ipairs(items) do
+            local e = Entry(i)
+            local button, label, button2 = item[1], item[2], item[3]
+            for _, part in ipairs({ e.prompt, e.native, e.native2, e.icon, e.icon2, e.key, e.label }) do if part then part:Hide() end end
+            local w
+            local usePrompt = not (ns.db and ns.db.nativePrompts == false) and e.prompt and not button2 and button ~= "PADDPAD"
+            if usePrompt and Glyphs.BindNativePrompt(e.prompt, button, label, "GameFontHighlightSmall") then
+                w = e.prompt:GetWidth()
+                if not w or w < 10 then
+                    local okT, t = pcall(e.prompt.GetPromptTextControl, e.prompt)
+                    local tw = okT and t and t.GetStringWidth and t:GetStringWidth()
+                    w = 22 + (tw or 40)
+                end
+                e.prompt:Show()
+            else
+                if button ~= "PADDPAD" and e.native and Glyphs.BindNativeIcon(e.native, button) then
+                    e.native:Show()
+                    w = 22
+                    if button2 and e.native2 and Glyphs.BindNativeIcon(e.native2, button2) then e.native2:Show() w = w + 20 end
+                elseif Glyphs.Apply(e.icon, button) then
+                    w = 22
+                    if button2 and Glyphs.Apply(e.icon2, button2) then w = w + 20 end
+                else
+                    e.key:SetText(Glyphs.Text(button) .. (button2 and ("/" .. Glyphs.Text(button2)) or ""))
+                    e.key:Show()
+                    w = e.key:GetStringWidth()
+                end
+                e.label:ClearAllPoints()
+                e.label:SetPoint("LEFT", e, "LEFT", w + 4, 0)
+                e.label:SetText(label)
+                e.label:Show()
+                w = w + 4 + e.label:GetStringWidth()
+            end
+            e:SetWidth(w)
+            e:ClearAllPoints()
+            e:SetPoint("LEFT", strip, "LEFT", total, 0)
+            e:Show()
+            total = total + w + gap
+        end
+        for i = #items + 1, #entries do entries[i]:Hide() end
+        strip:SetWidth(math.max(1, total - gap))
+    end
+    return bar
 end
 function Glyphs.MixinReport()
     ScanMixins()

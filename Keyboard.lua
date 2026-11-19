@@ -86,14 +86,20 @@ end
 -- Chat edit boxes -------------------------------------------------------------------
 local chatBoxes, chatBoxHooked, chatBoxGuard = {}, {}, false
 
+-- Whether a field gaining focus right now would open the keyboard by itself. The chat box fade
+-- below asks the same question, so the box is never faded while no keyboard is coming.
+function ns.AutoOpenAllowed()
+    local db = ns.db
+    if not db or not db.enabled or not db.autoShow then return false end
+    if db.requirePad and not ns.IsGamepadActive() then return false end
+    return not ns.loadingQuiet
+end
+
 local function ChatBoxShouldHide(box)
     if ns.db and ns.db.hideChatBox == false then return false end
     if not (ns.db and ns.db.enabled) then return false end
     if box:HasFocus() and ns.dismissedBox == box then return false end
-    if box:HasFocus() and not frame:IsShown() then
-        local db = ns.db
-        return db.autoShow and (not db.requirePad or ns.IsGamepadActive()) or false
-    end
+    if box:HasFocus() and (not frame:IsShown() or KB.closing) then return ns.AutoOpenAllowed() end
     return true
 end
 
@@ -129,22 +135,33 @@ local function SetupChatBoxes()
 end
 
 -- From addon load until a few seconds after each loading screen, automatic opening is held off
--- (see ns.OnTargetFocused). A manual open (key binding, /ebg kb) still works.
+-- (see ns.OnTargetFocused). A manual open (key binding, /ebg show) still works.
+-- Every way in ends with a timer that lifts it: the end of a loading screen, entering the world,
+-- and, for a loading screen whose end is never reported, a 30 second backstop. Left on, the
+-- keyboard would never open by itself again until the next loading screen.
 ns.loadingQuiet = true
 local quietToken = 0
 local function QuietFor(seconds)
     quietToken = quietToken + 1
     local token = quietToken
     ns.loadingQuiet = true
-    C_Timer.After(seconds, function() if token == quietToken then ns.loadingQuiet = false end end)
+    C_Timer.After(seconds, function()
+        if token ~= quietToken then return end
+        ns.loadingQuiet = false
+        ns.ApplyChatBoxVisibility()
+    end)
 end
+QuietFor(30)
 local setup = CreateFrame("Frame")
 setup:RegisterEvent("PLAYER_LOGIN")
 setup:RegisterEvent("PLAYER_ENTERING_WORLD")
 setup:RegisterEvent("LOADING_SCREEN_ENABLED")
+setup:RegisterEvent("LOADING_SCREEN_DISABLED")
 setup:SetScript("OnEvent", function(_, event)
-    if event == "PLAYER_LOGIN" then SetupChatBoxes()
-    elseif event == "LOADING_SCREEN_ENABLED" then ns.loadingQuiet = true quietToken = quietToken + 1
+    if event == "PLAYER_LOGIN" then
+        local ok, err = pcall(SetupChatBoxes)
+        if not ok then ns.Print("Chat box setup failed: " .. tostring(err)) end
+    elseif event == "LOADING_SCREEN_ENABLED" then QuietFor(30)
     else QuietFor(3) end
 end)
 
@@ -1178,11 +1195,13 @@ function KB:SetKeyGlyph(b, button)
         b.text:SetPoint("CENTER", 0, b.templated and 0 or 0)
         return
     end
-    b.text:SetPoint("CENTER", 11, 0)
+    -- b.glyphSize lets other panels (the auction house) draw larger glyphs than the keyboard's.
+    local size = b.glyphSize or 18
+    b.text:SetPoint("CENTER", math.floor(size / 2 + 2), 0)
     if b.padNative == nil then
         b.padNative = ns.Glyphs.CreateNativeIcon(b) or false
-        if b.padNative then b.padNative:SetSize(20, 19) end
     end
+    if b.padNative then b.padNative:SetSize(size + 2, size + 1) end
     if b.padNative and ns.Glyphs.BindNativeIcon(b.padNative, button) then
         b.padNative:ClearAllPoints()
         b.padNative:SetPoint("RIGHT", b.text, "LEFT", -5, 0)
@@ -1191,8 +1210,8 @@ function KB:SetKeyGlyph(b, button)
     end
     if not b.padIcon then
         b.padIcon = b:CreateTexture(nil, "OVERLAY")
-        b.padIcon:SetSize(18, 18)
     end
+    b.padIcon:SetSize(size, size)
     b.padIcon:ClearAllPoints()
     b.padIcon:SetPoint("RIGHT", b.text, "LEFT", -5, 0)
     if not ns.Glyphs.Apply(b.padIcon, button) then b.text:SetPoint("CENTER", 0, 0) end
@@ -1223,16 +1242,19 @@ function KB:RefreshKeys()
                 if not b.keyIcon then
                     b.keyIcon = b:CreateTexture(nil, "OVERLAY")
                     b.keyIcon:SetPoint("CENTER", 0, 0)
-                    b.keyIcon:SetSize(24, 24)
+                    b.keyIcon:SetSize(32, 32)
                 end
-                local ok = C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(icon)
-                if ok then
+                -- The atlas first, then the same art as a texture file, then the key's text label.
+                local shown = false
+                if C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(icon) then
                     b.keyIcon:SetAtlas(icon, false)
-                    b.keyIcon:Show()
-                else
-                    b.keyIcon:Hide()
-                    b.text:SetText("Q")
+                    shown = true
+                elseif key.iconFile then
+                    b.keyIcon:SetTexCoord(0, 1, 0, 1)
+                    shown = b.keyIcon:SetTexture(key.iconFile) ~= false
                 end
+                b.keyIcon:SetShown(shown)
+                if not shown then b.text:SetText(key.iconText or "?") end
             elseif b.keyIcon then
                 b.keyIcon:Hide()
             end
@@ -1490,8 +1512,28 @@ function KB:MoveCaret(dir)
     self:RefreshPreview()
 end
 
+-- Closes chat (or, for another field, releases its focus) from addon code: the tested exception
+-- to the focus rule below. Each call is noted in the trail so a later block can be traced to it.
+local function ReleaseField(box, tag)
+    if not box or box.isComposer or box.isEBGInput or box:IsForbidden() then return end
+    if ns.IsChatBox(box) then
+        local close = ChatEdit_DeactivateChat or (ChatFrameUtil and ChatFrameUtil.DeactivateChat)
+        if close then
+            ns.NoteAction(tag .. " DeactivateChat")
+            local ok, err = pcall(close, box)
+            if not ok then ns.Debug(tag, "DeactivateChat error", err) end
+        end
+    end
+    if box:HasFocus() then
+        ns.NoteAction(tag .. " ClearFocus")
+        local ok, err = pcall(box.ClearFocus, box)
+        if not ok then ns.Debug(tag, "ClearFocus error", err) end
+    end
+end
+
 -- Focus rule: this addon never changes keyboard focus itself (no ClearFocus, no chat
--- deactivate, no Enter handlers). On Forever a focus change runs Blizzard's gamepad binding
+-- deactivate, no Enter handlers), except through ReleaseField above: closing chat after Send,
+-- and releasing the field when the reload pop-up opens. On Forever a focus change runs Blizzard's gamepad binding
 -- manager, and when addon code starts it that manager's state is tainted for the rest of the
 -- session, which blocks SetPreferredGamepadInteractTarget. Focus is only ever released by
 -- Blizzard's own handling of a real button press. Important
@@ -1532,6 +1574,17 @@ function KB:Submit()
         -- A mouse click on Send takes focus before the loss is noticed, so check the box itself;
         -- submittedAt covers the loss being reported just after this.
         self.submittedAt = GetTime()
+        -- Closing chat after Send (/ebg closeonsend, default on) is the one exception to the
+        -- focus rule above: tested on Forever 2026-11-17 (whisper and slash command, then
+        -- guard, banker, auctioneer and vendor interaction) with no blocked action. Each close
+        -- is noted in the trail so a later block can still be traced back to it.
+        if ns.db and ns.db.closeOnSend then
+            -- A mouse click on Send takes focus first, leaving chat open but unfocused, so close
+            -- whenever the box is still up, not only while it has focus.
+            if box:HasFocus() or box:IsShown() then ReleaseField(box, "closeonsend") end
+            ns.HideKeyboard()
+            return
+        end
         if self.detached or not box:HasFocus() then ns.HideKeyboard() end
         return
     end
@@ -1665,6 +1718,114 @@ function ACTIONS.shift(self)
     self:RefreshKeys()
 end
 
+-- The reload key's confirmation pop-up: EBG's own, drawn like Blizzard's (an addon dialog in
+-- Blizzard's shared StaticPopup system taints it). ReloadUI is protected on this client: only
+-- Blizzard's secure code may call it, even inside a key press. So Accept is a secure action button
+-- running the macro "/reload" - the same as typing it - laid over the Accept key for the mouse and,
+-- while Accept is highlighted, bound to A (override binding). B or Cancel closes the pop-up.
+local confirm
+local function ConfirmReload()
+    if not confirm then
+        confirm = CreateFrame("Frame", "EBGReloadConfirm", UIParent, "BackdropTemplate")
+        confirm:SetFrameStrata("FULLSCREEN_DIALOG")
+        confirm:SetToplevel(true)
+        confirm:SetClampedToScreen(true)
+        confirm:SetSize(340, 112)
+        confirm:SetPoint("TOP", UIParent, "TOP", 0, -135)
+        confirm:EnableMouse(true)
+        ns.Skin.Panel(confirm)
+        confirm.text = confirm:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        confirm.text:SetPoint("TOP", 0, -24)
+        confirm.text:SetWidth(300)
+        confirm.text:SetText("Reload the user interface?")
+        confirm.keys = {}
+        local labels = { { ACCEPT or "Accept", "PAD1" }, { CANCEL or "Cancel", "PAD2" } }
+        for i, entry in ipairs(labels) do
+            local b = ns.Skin.CreateKey(confirm)
+            b:SetSize(132, 32)
+            b:SetPoint("BOTTOM", (i == 1 and -1 or 1) * 72, 18)
+            b.text:SetText(entry[1])
+            b.glyphSize = 22
+            KB:SetKeyGlyph(b, entry[2])
+            b:SetScript("OnEnter", function() confirm.focus = i confirm:Paint() end)
+            if i == 2 then b:SetScript("OnClick", function() confirm:Hide() end) end
+            confirm.keys[i] = b
+        end
+        local accept = CreateFrame("Button", "EBGReloadConfirmAccept", confirm, "SecureActionButtonTemplate")
+        accept:SetAttribute("type", "macro")
+        accept:SetAttribute("macrotext", "/reload")
+        accept:RegisterForClicks("AnyUp", "AnyDown")
+        accept:SetAllPoints(confirm.keys[1])
+        accept:SetFrameLevel(confirm.keys[1]:GetFrameLevel() + 5)
+        accept:HookScript("OnEnter", function() confirm.focus = 1 confirm:Paint() end)
+        -- A is bound to Accept only once armed (shortly after opening), so the release of the A that
+        -- opened the pop-up can never accept it, and only while Accept is highlighted.
+        function confirm:Paint()
+            for i, b in ipairs(self.keys) do ns.Skin.StyleKey(b, i == self.focus and "selected" or "fn") end
+            if InCombatLockdown() then return end
+            ClearOverrideBindings(self)
+            if self.armed and self.focus == 1 and self:IsShown() then
+                SetOverrideBindingClick(self, true, "PAD1", "EBGReloadConfirmAccept", "LeftButton")
+            end
+        end
+        local function Bound(self, key) return key == "PAD1" and self.armed and self.focus == 1 end
+        local pressed
+        confirm:SetScript("OnGamePadButtonDown", function(self, key)
+            if InCombatLockdown() then return end
+            -- A on Accept goes on to its binding (the secure button).
+            if Bound(self, key) then self:SetPropagateKeyboardInput(true) return end
+            self:SetPropagateKeyboardInput(false)
+            pressed = key
+            if key == "PADDLEFT" or key == "PADDRIGHT" then self.focus = 3 - self.focus self:Paint() end
+        end)
+        confirm:SetScript("OnGamePadButtonUp", function(self, key)
+            if InCombatLockdown() then return end
+            if Bound(self, key) then self:SetPropagateKeyboardInput(true) return end
+            if pressed ~= key then return end
+            pressed = nil
+            if key == "PAD2" or (key == "PAD1" and self.armed and self.focus == 2) then self:Hide() end
+        end)
+        confirm:SetScript("OnKeyDown", function(self, key)
+            if InCombatLockdown() then return end
+            local escape = key == "ESCAPE"
+            self:SetPropagateKeyboardInput(not escape)
+            if escape then self:Hide() end
+        end)
+        confirm:SetScript("OnHide", function(self)
+            self.armed = false
+            if not InCombatLockdown() then
+                ClearOverrideBindings(self)
+                self:EnableGamePadButton(false)
+                self:EnableKeyboard(false)
+            end
+        end)
+        -- The pop-up holds a secure button and a binding, neither of which can change in combat,
+        -- so it closes as combat starts (this event arrives just before the lockdown).
+        confirm:RegisterEvent("PLAYER_REGEN_DISABLED")
+        confirm:SetScript("OnEvent", function(self) if self:IsShown() then self:Hide() end end)
+    end
+    confirm.focus, confirm.armed = 1, false -- like Blizzard's pop-ups, A on Accept; B cancels
+    confirm:Show()
+    confirm:Paint()
+    confirm:EnableKeyboard(true)
+    confirm:SetPropagateKeyboardInput(true)
+    confirm:EnableGamePadButton(true)
+    C_Timer.After(0.35, function()
+        if confirm:IsShown() and not InCombatLockdown() then confirm.armed = true confirm:Paint() end
+    end)
+end
+ns.ConfirmReload = ConfirmReload
+function ACTIONS.reload(self)
+    -- Secure buttons and bindings cannot be set up in combat.
+    if InCombatLockdown() then ns.Print("Reload the interface after combat.") return end
+    -- While a text field has focus the game gives it the button presses and key bindings do not
+    -- fire, so A could never reach the pop-up's Accept binding. The field is released first (any
+    -- unsent text would be lost to the reload anyway).
+    local box = self.target
+    ns.HideKeyboard()
+    ReleaseField(box, "reload")
+    ConfirmReload()
+end
 function ACTIONS.symbols(self) self:SetPage(self.page == "symbols" and "letters" or "symbols") end
 function ACTIONS.accents(self) self:SetPage(self.page == "accents" and "letters" or "accents") end
 function ACTIONS.letters(self) self:SetPage("letters") end
@@ -1854,6 +2015,9 @@ end)
 local previewElapsed = 0
 frame:SetScript("OnUpdate", function(self, dt)
     local now = GetTime()
+    -- Remember when the mouse was last pressed on the keyboard, so a focus loss can be told
+    -- apart from one caused by Enter or Escape while the pointer just rests over the keyboard.
+    if IsMouseButtonDown and IsMouseButtonDown() and self:IsMouseOver() then KB.clickedAt = now end
     -- Once a click on the keyboard has cost the text field its focus, no focus event will close
     -- the keyboard any more, so a click anywhere outside it does.
     if KB.detached and not KB.closing and IsMouseButtonDown and IsMouseButtonDown() and not self:IsMouseOver() then
@@ -2169,34 +2333,41 @@ function ns.RebuildKeyboard(resetKeys)
     KB:Build()
 end
 
-local function SafeOpen(fn, ...)
+-- If opening fails, the field is marked dismissed so a faded chat box shows again instead of
+-- leaving an invisible, focused box and no keyboard.
+local function SafeOpen(fn, box, ...)
     local ok, err = pcall(fn, ...)
     if not ok then
+        KB.closing = false
         ns.HideChatMirror()
         ns.SetNativeLegendHidden(false)
         ns.SetNavPointerHidden(false)
         frame:Hide()
+        if box and not box:IsForbidden() and box:HasFocus() then ns.dismissedBox = box end
+        ns.ApplyChatBoxVisibility()
         ns.Print("Could not open the keyboard: " .. tostring(err))
     end
 end
 
 function ns.OnTargetFocused(box)
-    if KB.target and KB.target.isEBGInput and frame:IsShown() then return end
+    if KB.target and KB.target.isEBGInput and frame:IsShown() and not KB.closing then return end
     if not ns.Input.Allows(box) then
         ns.HideKeyboard()
         return
     end
-    if frame:IsShown() then
-        SafeOpen(KB.SetTarget, KB, box)
+    -- A keyboard still finishing its close (waiting for a held button's release) counts as closed:
+    -- retargeting it would let it finish closing on the newly focused field.
+    if frame:IsShown() and not KB.closing then
+        if KB.target ~= box then SafeOpen(KB.SetTarget, box, KB, box) end
         return
     end
-    local db = ns.db
-    if not db or not db.enabled or not db.autoShow then return end
-    if db.requirePad and not ns.IsGamepadActive() then return end
     -- A field focused while the game is loading (login, reload, loading screens) was not chosen by
     -- the player, so the keyboard never opens by itself then.
-    if ns.loadingQuiet then return end
-    SafeOpen(ns.ShowKeyboard, false)
+    if not ns.AutoOpenAllowed() then
+        ns.ApplyChatBoxVisibility()
+        return
+    end
+    SafeOpen(ns.ShowKeyboard, box, false)
     ns.ApplyChatBoxVisibility()
 end
 
@@ -2206,8 +2377,11 @@ end
 function ns.OnTargetLost()
     local box = KB.target
     if box and box.isEBGInput then return end
-    local justSent = KB.submittedAt and GetTime() - KB.submittedAt < 0.5
-    if not justSent and frame:IsShown() and not KB.closing and box and not box:IsForbidden() and frame:IsMouseOver() then
+    local now = GetTime()
+    local justSent = KB.submittedAt and now - KB.submittedAt < 0.5
+    -- Focus loss is reported up to LOSS_GRACE (0.2s) plus one poll after the click.
+    local clicked = KB.clickedAt and now - KB.clickedAt < 0.6
+    if not justSent and clicked and frame:IsShown() and not KB.closing and box and not box:IsForbidden() and frame:IsMouseOver() then
         KB.detached = true
         return
     end

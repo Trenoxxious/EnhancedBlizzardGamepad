@@ -29,9 +29,24 @@ product folder Forever uses on your install), then `/reload`.
 
 Mouse clicks on keys also work, which is the fallback in combat.
 
+## Options page
+
+Esc > Options > AddOns > Enhanced Blizzard Gamepad (or `/ebg` with nothing after it, or
+`/ebg options`) holds the everyday settings: enable, automatic opening, gamepad-only, sounds,
+layout, style, scale, background shade, left-stick selection, navigation pointer, the chat
+settings (close after Send, hide the chat input, chat copy, right-stick scroll, fade the chat
+window, group finder whisper), Blizzard's legend and prompts, and the auction house settings.
+Art overrides and diagnostics stay as slash commands.
+
+The page is a canvas drawn with Blizzard's own row templates, built once at login, not rows
+added to Blizzard's settings list: on Forever the list reuses its row frames across categories,
+and addon-made rows carried taint into other pages. Every control reads and writes through
+`Options.lua`'s proxy, so it shows the value the code actually uses (several settings are stored
+as "unset means on") and applies changes at once.
+
 ## Slash commands
 
-`/ebg` or `/ebgamepad`
+`/ebg` or `/ebgamepad` (no command opens the options page; `help` lists the commands)
 
 - `show`, `hide`, `toggle` (toggle with no field focused opens chat)
 - `auto on|off` auto popup on focus
@@ -51,6 +66,7 @@ Mouse clicks on keys also work, which is the fallback in combat.
 - `ah` opens the gamepad auction browser while visiting an auctioneer; `ah auto` toggles automatic opening with a gamepad
 - `enter` explains the retired Enter-handler option. Native Enter handlers are never executed by EBG; Done keeps text and closes the keyboard
 - `chatbox` toggles fading the real chat edit box while the keyboard is typing into it (default on, so the preview strip is the only visible input)
+- `closeonsend [on|off]` Send in chat also closes chat and the keyboard (default on; see Focus rule below)
 - `legend` toggles fading Blizzard's persistent gamepad legend while the keyboard is open (default on, since its L2/R2 hints conflict with Shift/Send)
 - `probe [FrameName]` lists the mixin functions and fields on a frame; with no name it probes Blizzard's own gamepad InputIcon, which shows the API the native legend uses to pick button art
 - `sounds`
@@ -63,10 +79,18 @@ A key binding "EBG toggle" is also available under Key Bindings > AddOns.
 The addon never changes keyboard focus itself. On Forever, a focus change runs Blizzard's gamepad
 binding manager; started from addon code it taints that manager for the session and Blizzard then
 blocks `SetPreferredGamepadInteractTarget` ("blocked from an action only available to the
-Blizzard UI"). So: Send in chat sends and clears but leaves chat open; Circle in chat empties the
-message and passes the press through so Blizzard closes chat; outside chat, Send and Circle put
-the keyboard away and leave the field focused. `/ebg show` reopens the keyboard on a field that
-is still focused.
+Blizzard UI"). So: Circle in chat empties the message and passes the press through so Blizzard
+closes chat; outside chat, Send and Circle put the keyboard away and leave the field focused.
+`/ebg show` reopens the keyboard on a field that is still focused.
+
+The one exception is Send in chat, which sends, then closes chat and the keyboard. This was tested
+on Forever (whispers and slash commands, then interacting with a guard, banker, auctioneer and
+vendor) with no blocked action. Each close is noted in the blocked-action trail
+("closeonsend DeactivateChat"), so if `/ebg blocked` ever shows a block after it,
+`/ebg closeonsend off` returns to the old behaviour: Send leaves chat open and Circle closes it.
+
+Enter and Escape on a physical keyboard are handled by Blizzard and close chat and the keyboard.
+The keyboard stays open after losing focus only when the mouse was just pressed on it.
 
 Bag and bank search are a second case: writing into that search box runs Blizzard's bag filter
 as addon code and can cause the same block. EBG keeps the query in one shared buffer and calls
@@ -117,8 +141,10 @@ filter menu (general options; rarities in their quality colours). The Filter but
 settings differ from the defaults. Apply and search submits these through the auction query API;
 no native search handler or category mixin is called. Any (zero) means no level limit.
 
-Views: Buy (search, inspect, buy out or bid), Sell (auctionable bag items), Recent
-(eight recent search strings), Auctions (review and cancel your listings). Modern item selection loads
+Views: Buy (search, inspect, buy out or bid), Sell (auctionable bag items), Auctions (review and
+cancel your listings; sold auctions stay listed greyed out, with the time until their gold reaches
+the mailbox, and cannot be cancelled). Previous/Next are greyed out when there is no page in that
+direction. Modern item selection loads
 individual auction/commodity rows. Native window closes the overlay without closing the auctioneer.
 A launcher button and `/ebg ah` reopen it.
 
@@ -170,7 +196,7 @@ the offline test suite; live secure-execution and visual checks remain required.
 | D-pad up/down | Move selection |
 | D-pad left/right | Move between categories and results, or adjacent controls |
 | Cross / A | Activate selection (on release) |
-| Circle / B | Back from filters/listings; otherwise close overlay |
+| Circle / B | Back from filters/listings; otherwise close the auction house (the browser and Blizzard's window together; Blizzard's window is never left on screen in gamepad mode) |
 | Square / X | Enter search using EBG's keyboard |
 | Triangle / Y | Search again / refresh current view |
 | L1 / R1 (LB / RB) | Change view |
@@ -187,21 +213,33 @@ owns transaction validation and API state; AuctionTradeUI.lua owns the controlle
 Modern and legacy APIs are detected independently.
 
 The breadcrumb displays the full applied category path. Browse, listings, filters, selling,
-recent searches, and owned auctions each have a distinct heading and explanatory text. Listings
+and owned auctions each have a distinct heading and explanatory text. Listings
 and filters expose an explicit Back control. Category controls appear only while browsing;
 other views explain what their rows represent. Up from the first result returns to the search
 toolbar, left/right moves between results and categories, and category navigation advances its
-page when reaching the end. The item preview pane shows the item's own tooltip, scaled down when
-needed to fit the pane, with price and quantity beneath it. Prices use the gold, silver and copper
+page when reaching the end. The item preview pane (Blizzard's tiled Necrolord background in a
+bronze frame) shows only the focused item's own tooltip, scaled down when needed to fit, and its
+quantity; with no item focused it fades to a faint outline. Prices use the gold, silver and copper
 coin icons. AuctionStyle.lua owns this visual language independently
 of the keyboard's key art.
 
 ## Item link picker
 
-The chat keyboard's Items button opens a read-only list of carried items with icons, rarity color,
+The chat keyboard's Items button (the bag icon, beside the quest icon) opens a read-only list of carried items with icons, rarity color,
 combined counts for identical links, and an item tooltip. Cross/A inserts the exact link and
 returns to typing. L1/R1 changes pages; Circle/B returns without clearing the message. Bag updates
 refresh the picker. It never picks up, equips, moves, or sells an item.
+
+The keyboard's bottom row also has a Reload key (the crossbar-edit icon). It closes the keyboard
+and shows a confirmation pop-up (EBG's own, styled like Blizzard's, so Blizzard's shared pop-up
+system is never tainted). A/Accept reloads the UI, the same as typing /reload; B, Cancel or Escape
+dismisses it. ReloadUI is protected on this client, so Accept is a secure action button
+running the macro `/reload`; while Accept is highlighted, A is an override binding to it (armed a
+moment after the pop-up opens, so the press that opened it cannot accept it). It is not offered in
+combat and closes when combat starts. It is
+on every text field, not only chat. Opening the pop-up also closes chat (or releases the text
+field), because key bindings do not fire while a field has focus and A would never reach Accept;
+any unsent text is dropped, as the reload would drop it anyway.
 
 ## Group browser whisper
 
@@ -248,7 +286,14 @@ presets in `Skin.lua` (or tried live with `/ebg glow <atlas>`).
 ## How it works
 
 - `FocusTracker.lua` hooks OnEditFocusGained/Lost on every EditBox it can enumerate and polls
-  `GetCurrentKeyBoardFocus()` every 0.1s as a catch-all. Forbidden frames are skipped.
+  `GetCurrentKeyBoardFocus()` every 0.1s as a catch-all. Forbidden frames are skipped. A focus
+  gain on the field already tracked still offers the keyboard again, and its callbacks are
+  wrapped so an error is reported once instead of breaking the poll.
+- Loading: automatic opening is held off from load until 3s after entering the world or the end
+  of each loading screen, with a 30s backstop so it can never stay held. While it is held, and
+  whenever opening fails, the chat input is not faded, so chat is never left invisible with no
+  keyboard. Each startup hook in `Core.lua` runs on its own and reports its own failure.
+  `Bindings.xml` is loaded by the game itself and is not listed in the TOC.
 - `Keyboard.lua` captures pad input with `EnableGamePadButton`, `EnableGamePadStick` and
   `SetPropagateKeyboardInput(false)` while shown. Those calls are protected in combat, so in combat
   the keyboard stays visible but mouse-only and re-arms on leaving combat.
@@ -282,7 +327,7 @@ so those clients fall back to QWERTY.
   and subsequent gamepad navigation. Check `/ebg blocked`; collect the client's taint log if blocked.
 - Search auctions by name and category; expand Weapons and Armor into nested categories/slots.
   Verify filters/levels/sort and Available counts against the native frame. Inspect commodity and
-  equipment listings, page results, use Sell/Recent/Auctions, and return to native controls.
+  equipment listings, page results, use Sell/Auctions (including a sold auction), and return to native controls.
 - Buy one inexpensive item and a small commodity quantity, place a bid, post an item and a
   commodity, and cancel an owned auction. Check prices, deposits, confirmations, success/error
   messages, and mail. Exercise posting warnings, quote expiry, and inventory changes during review.

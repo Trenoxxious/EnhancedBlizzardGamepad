@@ -17,6 +17,7 @@ local LABEL_X,LABEL_W,FIELD_X = 30,112,152
 local LIST_ROWS,LIST_ROW_H = 9,32
 local overlay,panel,title,itemIcon,itemName,itemSub,message,legend
 local listTitle,listHeadPrice,listHeadQty,listEmpty
+local titleBand,rightPane,rightBand
 local labels,values,infoLabels,infoValues = {},{},{},{}
 local pool,listButtons,controls,selected = {},{},{},1
 local lastPhase,lastTrade
@@ -54,8 +55,12 @@ local function Create()
     panel:SetSize(W,H)
     panel:SetPoint("CENTER")
     ns.Skin.Panel(panel)
-    Style.Band(panel,16,-14,W-32,30)
+    -- Title bar flush along the top inner edge of the border.
+    titleBand = Style.Band(panel,0,0,1,30)
+    ns.Skin.DockBar(titleBand,panel,"TOP",30)
     title = Text("GameFontNormal",16,-14,W-32,30,"CENTER")
+    title:ClearAllPoints()
+    title:SetAllPoints(titleBand)
     -- Left: item card and form.
     Style.Pane(panel,LEFT_X,PANE_Y,LEFT_W,PANE_H,"detail")
     itemIcon = panel:CreateTexture(nil,"ARTWORK")
@@ -72,9 +77,9 @@ local function Create()
     message = Text("GameFontHighlightSmall",LEFT_X+14,0,LEFT_W-28,44,"CENTER")
     message:SetJustifyV("TOP")
     -- Right: current listings (selling) or the listing's details (buying, cancelling).
-    Style.Pane(panel,RIGHT_X,PANE_Y,RIGHT_W,PANE_H,"results")
+    rightPane = Style.Pane(panel,RIGHT_X,PANE_Y,RIGHT_W,PANE_H,"results")
     listTitle = Text("GameFontNormal",RIGHT_X+12,PANE_Y-8,200,26)
-    Style.Band(panel,RIGHT_X+1,PANE_Y-40,RIGHT_W-2,22)
+    rightBand = Style.Band(panel,RIGHT_X+1,PANE_Y-40,RIGHT_W-2,22)
     listHeadPrice = Text("GameFontNormalSmall",RIGHT_X+12,PANE_Y-40,170,22,"RIGHT")
     listHeadPrice:SetText("Unit Price")
     listHeadQty = Text("GameFontNormalSmall",RIGHT_X+200,PANE_Y-40,120,22,"RIGHT")
@@ -99,8 +104,27 @@ local function Create()
         infoLabels[i] = Text("GameFontNormalSmall",RIGHT_X+14,PANE_Y-48-(i-1)*28,150,24)
         infoValues[i] = Text("GameFontHighlight",RIGHT_X+150,PANE_Y-48-(i-1)*28,RIGHT_W-164,24,"RIGHT")
     end
-    Style.Rule(panel,LEFT_X,-488,W-40)
-    legend = Text("GameFontHighlightSmall",160,-500,W-180,30)
+    -- The same legend bar as the keyboard's, flush along the bottom inner edge of the border; the
+    -- Back key sits inside it at the left. It stays below the keys.
+    legend = ns.Glyphs.CreateLegendBar(panel)
+    ns.Skin.DockBar(legend,panel,"BOTTOM")
+    legend:SetFrameLevel(panel:GetFrameLevel())
+end
+-- Footer geometry: the legend bar's top edge, and the Back key centred inside the bar.
+local function FooterTop() return -(H-ns.Skin.ContentInset(panel)-legend:GetHeight()) end
+local BACK_W,BACK_H = 124,30
+-- Cancelling has nothing to show beside the form (the fee and quantity are on it), so its window
+-- is just the left pane; selling and buying keep the right pane.
+local function SetCompact(compact)
+    local width = compact and LEFT_X*2+LEFT_W or W
+    panel:SetWidth(width) -- the title and legend bars are anchored to both sides, so they follow
+    rightPane:SetShown(not compact)
+    rightBand:SetShown(not compact)
+    listTitle:SetShown(not compact)
+    if compact then
+        listHeadPrice:Hide() listHeadQty:Hide() listEmpty:Hide()
+        for i = 1,#infoLabels do infoLabels[i]:Hide() infoValues[i]:Hide() end
+    end
 end
 
 local function Bind(b,action)
@@ -177,7 +201,9 @@ end
 
 local function Number(titleText,value,accept)
     local t = Trade.current
-    local buffer = ns.Input.NewBuffer(titleText,value and value>0 and tostring(value) or "",function(text)
+    -- Entry starts at 0 (the first digit typed replaces it); the current value is in the title.
+    if value and value>0 then titleText = titleText.." (now "..value..")" end
+    local buffer = ns.Input.NewBuffer(titleText,"0",function(text)
         if Trade.current~=t or t.phase~="edit" then return end
         if text=="" then text="0" end
         local n = tonumber(text)
@@ -370,8 +396,11 @@ Refresh = function()
     local t = Trade.current
     if not t then
         if overlay then overlay:Hide() end
+        local closed = lastTrade~=nil
         lastTrade,lastPhase = nil,nil
         UI.SyncBindings()
+        -- The browser redraws once the panel has closed, which brings back its preview tooltip.
+        if closed and ns.AuctionData and ns.AuctionData.changed then ns.AuctionData.changed() end
         return
     end
     if not ns.Auction or not ns.Auction.frame then return end
@@ -409,8 +438,8 @@ Refresh = function()
     local back
     if t.phase~="sending" then
         local finished = t.phase=="done" or t.phase=="error"
-        back = Key(finished and "Close" or "Back",LEFT_X,-498,124,
-            finished and function() Trade.Close() end or Trade.Back,"secondary","PAD2",30)
+        back = Key(finished and "Close" or "Back",LEFT_X,FooterTop()-(legend:GetHeight()-BACK_H)/2,BACK_W,
+            finished and function() Trade.Close() end or Trade.Back,"secondary","PAD2",BACK_H)
     end
     local used = {}
     for _,b in ipairs(controls) do used[b] = true end
@@ -426,12 +455,16 @@ Refresh = function()
     else
         for i,b in ipairs(controls) do if b==old then selected = i end end
     end
-    local actionLabel = primary and primary.text:GetText()
-    local G = ns.Glyphs.Legend
-    -- Y and B are shown on the keys they press (the main action and Back); the footer keeps
-    -- only inputs with no key of their own.
-    legend:SetText(G("PAD1","Select").."     "..G("PADDPAD","Move",16)
-        ..((UI.listCount or 0)>0 and ("     "..G({"PADLTRIGGER","PADRTRIGGER"},"Scroll listings",16)) or ""))
+    SetCompact(t.kind=="cancel")
+    -- Y and B are shown on the keys they press (the main action and Back); the legend bar keeps
+    -- only inputs with no key of their own, centred in the space right of Back. While there is
+    -- nothing to press (waiting for the server) the bar is empty.
+    local items = {}
+    if #controls>0 then items = { {"PAD1","Select"} } end
+    if #controls>1 then items[#items+1] = {"PADDPAD","Move"} end
+    if (UI.listCount or 0)>0 and t.kind~="cancel" then items[#items+1] = {"PADLTRIGGER","Scroll listings","PADRTRIGGER"} end
+    legend:SetContentLeft(back and (LEFT_X-ns.Skin.ContentInset(panel)+BACK_W+8) or 0)
+    legend:SetItems(items)
     Select(selected)
 end
 

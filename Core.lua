@@ -17,7 +17,8 @@ local DEFAULTS = {
     bgAtlas = nil,           -- background atlas override (nil = preset)
     bgShade = 0.7,           -- 0 = art at full strength, 1 = solid black
     hideChatBox = true,      -- fade the real chat edit box while the keyboard targets it
-    chatMirror = true,       -- show a copy of the chat window above the keyboard while typing in chat
+    closeOnSend = true,      -- Send in chat also closes chat (/ebg closeonsend)
+    chatMirror = true,      -- show a copy of the chat window above the keyboard while typing in chat
     hideNavPointer = true,   -- park the native pointer beside the keyboard preview (or hide it)
     hideNativeLegend = true, -- fade the native legend while EBG shows contextual prompts
     nativePrompts = true,    -- build the legend from Blizzard's prompt entry template
@@ -93,26 +94,38 @@ local function SafeRegister(frame, event)
     pcall(frame.RegisterEvent, frame, event)
 end
 
+-- Each module hook runs on its own: an error in one is reported once and cannot stop the rest of
+-- the event (above all, the saved settings being attached at ADDON_LOADED).
+local reported = {}
+local function Run(label, fn, ...)
+    if not fn then return end
+    local ok, err = pcall(fn, ...)
+    if not ok and not reported[label] then
+        reported[label] = true
+        print("|cff66ccffEBG|r: " .. label .. " failed: " .. tostring(err))
+    end
+end
+
 f:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
         local name = ...
         if name == ADDON then
-            EnhancedBlizzardGamepadDB = EnhancedBlizzardGamepadDB or {}
-            ApplyDefaults(EnhancedBlizzardGamepadDB)
+            if type(EnhancedBlizzardGamepadDB) ~= "table" then EnhancedBlizzardGamepadDB = {} end
+            Run("Settings", ApplyDefaults, EnhancedBlizzardGamepadDB)
             ns.db = EnhancedBlizzardGamepadDB
-            if ns.OnCoreReady then ns.OnCoreReady() end
+            Run("Keyboard setup", ns.OnCoreReady)
         end
-        if ns.OnAddonLoaded then ns.OnAddonLoaded(name) end
+        Run("Field scan", ns.OnAddonLoaded, name)
     elseif event == "PLAYER_LOGIN" then
-        if ns.OnLogin then ns.OnLogin() end
+        Run("Focus tracking", ns.OnLogin)
     elseif event == "GAME_PAD_ACTIVE_CHANGED" or event == "GAME_PAD_CONNECTED" or event == "GAME_PAD_DISCONNECTED" then
-        if ns.OnPadStateChanged then ns.OnPadStateChanged() end
+        Run("Gamepad change", ns.OnPadStateChanged)
     elseif event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" then
-        ns.RecordBlockedAction(event, ...)
+        Run("Blocked-action log", ns.RecordBlockedAction, event, ...)
     elseif event == "PLAYER_REGEN_DISABLED" then
-        if ns.OnCombatStart then ns.OnCombatStart() end
+        Run("Combat start", ns.OnCombatStart)
     elseif event == "PLAYER_REGEN_ENABLED" then
-        if ns.OnCombatEnd then ns.OnCombatEnd() end
+        Run("Combat end", ns.OnCombatEnd)
     end
 end)
 
@@ -250,7 +263,10 @@ local function HandleSlash(msg)
     local cmd, rest = msg:match("^(%S*)%s*(.-)$")
     cmd = (cmd or ""):lower()
     local db = ns.db
-    if cmd == "show" then
+    if cmd == "" or cmd == "options" or cmd == "config" then
+        if ns.Options then ns.Options.Open() end
+        if cmd == "" then ns.Print("/ebg help lists the commands.") end
+    elseif cmd == "show" then
         ns.ShowKeyboard(true)
     elseif cmd == "hide" then
         ns.HideKeyboard()
@@ -367,6 +383,12 @@ local function HandleSlash(msg)
     elseif cmd == "enter" then
         db.submitEnter = nil
         ns.Print("Native Enter-handler execution was removed to prevent taint. Done closes the keyboard; auction search uses /ebg ah.")
+    elseif cmd == "closeonsend" then
+        -- Stored as true/false: nil would be reset to the default on the next load.
+        if rest == "on" then db.closeOnSend = true
+        elseif rest == "off" then db.closeOnSend = false
+        else db.closeOnSend = not db.closeOnSend end
+        ns.Print("Close chat after Send: " .. (db.closeOnSend and "on" or "off (Send leaves chat open; B closes it)"))
     elseif cmd == "chatbox" then
         db.hideChatBox = db.hideChatBox == false
         if ns.ApplyChatBoxVisibility then ns.ApplyChatBoxVisibility() end
@@ -477,7 +499,7 @@ local function HandleSlash(msg)
         lines[#lines + 1] = "Nav pointer: " .. ns.PointerDiagnostics()
         ns.ShowReport("status", lines)
     else
-        ns.Print("Commands: show, hide, toggle, ah [auto], auto [on|off], pad [on|off], layout <id>, scale <0.5-2>, skin <id>, glow <atlas|off>, atlas [FrameName|ui], bg <atlas|default>, shade <0-1>, keyart <up> [down]|off|default, keypad <0-0.4>, keybleed <0-12>, keyglow <0-2>, entrybox <base>|off|default, glyphs, mixins, probe <FrameName>, check <atlas names>, legendart, lfg, bagsearch, enter, legend, chatbox, pointer, mirror, mirrorscroll, fadechat, prompts, sounds, blocked [clear], status")
+        ns.Print("Commands: options, show, hide, toggle, ah [auto], auto [on|off], pad [on|off], layout <id>, scale <0.5-2>, skin <id>, glow <atlas|off>, atlas [FrameName|ui], bg <atlas|default>, shade <0-1>, keyart <up> [down]|off|default, keypad <0-0.4>, keybleed <0-12>, keyglow <0-2>, entrybox <base>|off|default, glyphs, mixins, probe <FrameName>, check <atlas names>, legendart, lfg, bagsearch, enter, legend, chatbox, closeonsend [on|off], pointer, mirror, mirrorscroll, fadechat, prompts, sounds, blocked [clear], status")
     end
 end
 
@@ -486,7 +508,10 @@ SlashCmdList.EBG = function(msg)
     if not ok then ns.Print("Error: " .. tostring(err)) end
 end
 
--- Exposed for Bindings.xml
+-- Exposed for Bindings.xml, which the game loads by itself (it must not be listed in the TOC:
+-- loaded as an interface file it only produces "Unrecognized XML" warnings).
+BINDING_HEADER_ENHANCEDBLIZZARDGAMEPAD = "Enhanced Blizzard Gamepad"
+BINDING_NAME_EBG_TOGGLE = "Toggle Keyboard"
 function EnhancedBlizzardGamepad_Toggle()
     ns.ToggleKeyboard()
 end

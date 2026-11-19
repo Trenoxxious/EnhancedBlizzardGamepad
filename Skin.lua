@@ -562,6 +562,23 @@ function Skin.Panel(frame)
     return mode
 end
 
+-- Distance from a skinned panel's outer edge to its inner edge (where the border art ends and the
+-- background begins; the same inset Skin.ApplyBackground uses). Title and legend bars sit exactly
+-- on it, so they meet the border with no gap.
+function Skin.ContentInset(frame)
+    if frame.metal and frame.metal.tl and frame.metal.tl:IsShown() then return 10 end
+    return 6
+end
+-- Anchors `bar` across the top or bottom inner edge of `panel`, flush with its border.
+function Skin.DockBar(bar, panel, side, height)
+    local inset = Skin.ContentInset(panel)
+    local y = side == "BOTTOM" and inset or -inset
+    bar:ClearAllPoints()
+    bar:SetPoint(side .. "LEFT", panel, side .. "LEFT", inset, y)
+    bar:SetPoint(side .. "RIGHT", panel, side .. "RIGHT", -inset, y)
+    if height then bar:SetHeight(height) end
+end
+
 function Skin.Diagnostics()
     local lines = {
         "Panel path: " .. tostring(Skin.lastPanel),
