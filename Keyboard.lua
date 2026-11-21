@@ -41,6 +41,61 @@ frame.layoutName = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall"
 frame.layoutName:SetPoint("TOPRIGHT", -PAD, -(PAD - 2))
 frame.layoutName:SetJustifyH("RIGHT")
 
+-- Settings: a small gear in the header's top right corner, not a key. The pad reaches it with
+-- D-pad up from the top row's last key (Delete); the mouse clicks it. The word "Settings" shows
+-- beside it only while it is selected, so it never competes with the keys.
+local GEAR_SIZE = 20
+local GEAR_ATLASES = { "QuestLog-icon-setting", "OptionsIcon-Brown", "mechagon-projects" }
+local GEAR_FILES = { "Interface\\WorldMap\\Gear_64Grey", "Interface\\Buttons\\UI-OptionsButton" }
+-- Puts a gear on `texture`: the first gear atlas this client has, else a gear texture file.
+-- Returns false if neither exists. Shared with the auction house's settings key.
+function ns.SetGearIcon(texture)
+    for _, atlas in ipairs(GEAR_ATLASES) do
+        if C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(atlas) then
+            texture:SetAtlas(atlas, false)
+            return true
+        end
+    end
+    for _, file in ipairs(GEAR_FILES) do
+        if texture:SetTexture(file) ~= false then return true end
+    end
+    return false
+end
+frame.gear = CreateFrame("Button", nil, frame)
+frame.gear:SetSize(GEAR_SIZE + 6, GEAR_SIZE + 6)
+frame.gear:SetPoint("TOPRIGHT", -(PAD - 4), -(PAD + 1))
+frame.gear.hilite = frame.gear:CreateTexture(nil, "BACKGROUND")
+frame.gear.hilite:SetPoint("TOPLEFT", -3, 3)
+frame.gear.hilite:SetPoint("BOTTOMRIGHT", 3, -3)
+frame.gear.hilite:SetTexture("Interface\\Buttons\\UI-Quickslot-Depress")
+frame.gear.hilite:SetVertexColor(1, 0.82, 0.3, 0.9)
+frame.gear.hilite:Hide()
+frame.gear.icon = frame.gear:CreateTexture(nil, "ARTWORK")
+frame.gear.icon:SetSize(GEAR_SIZE, GEAR_SIZE)
+frame.gear.icon:SetPoint("CENTER", 0, 0)
+do
+    if not ns.SetGearIcon(frame.gear.icon) then
+        frame.gear.icon:Hide()
+        frame.gear.fallback = frame.gear:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        frame.gear.fallback:SetPoint("CENTER")
+        frame.gear.fallback:SetText("Set")
+    end
+end
+-- The name tag sits on its own dark plate, so it reads cleanly over a channel tab beneath it.
+frame.gear.tag = CreateFrame("Frame", nil, frame.gear, "BackdropTemplate")
+frame.gear.tag:SetPoint("RIGHT", frame.gear, "LEFT", -2, 0)
+frame.gear.tag:SetHeight(20)
+frame.gear.tag:SetFrameLevel(frame.gear:GetFrameLevel() + 20)
+frame.gear.tag:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+frame.gear.tag:SetBackdropColor(0.04, 0.035, 0.03, 0.95)
+frame.gear.tag:SetBackdropBorderColor(0.62, 0.50, 0.25, 0.9)
+frame.gear.tag.text = frame.gear.tag:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+frame.gear.tag.text:SetPoint("CENTER", 0, 0)
+frame.gear.tag.text:SetText(_G.SETTINGS or "Settings")
+frame.gear.tag:SetWidth(frame.gear.tag.text:GetStringWidth() + 14)
+frame.gear.tag:Hide()
+local GEAR_ROOM = GEAR_SIZE + 14
+
 frame.preview = CreateFrame("Frame", nil, frame, "BackdropTemplate")
 frame.preview:SetPoint("TOPLEFT", PAD, -(PAD + HEADER_H))
 frame.preview:SetPoint("TOPRIGHT", -PAD, -(PAD + HEADER_H))
@@ -656,13 +711,41 @@ function KB:RefreshChannelColor()
     end
 end
 
+-- If the channel being typed in is one the player has just left, chat goes back to Say rather
+-- than keep a target the next Send would fail on.
+function KB:CheckChannelTarget()
+    local box = self.target
+    if not box or box:IsForbidden() or not ns.IsChatBox(box) or box:GetAttribute("chatType") ~= "CHANNEL" then return end
+    local id = tostring(box:GetAttribute("channelTarget") or "")
+    for _, ch in ipairs(JoinedChannels()) do
+        if tostring(ch.id) == id then return end
+    end
+    box:SetAttribute("chatType", "SAY")
+    if ChatEdit_UpdateHeader and not box.isComposer then pcall(ChatEdit_UpdateHeader, box) end
+end
+
+-- Group, guild and channel changes redraw the channel tabs while the keyboard is open. Channel
+-- events come in bursts (a zone change leaves and joins several at once) and the channel list
+-- can lag the event, so the redraw waits a moment and runs once per burst.
+local CHANNEL_EVENTS = {
+    "CHANNEL_UI_UPDATE", "CHAT_MSG_CHANNEL_NOTICE", "CHANNEL_LEFT", "CHANNEL_FLAGS_UPDATED",
+    "UPDATE_CHAT_COLOR", "PARTY_LEADER_CHANGED",
+}
 frame.tabs:RegisterEvent("GROUP_ROSTER_UPDATE")
 frame.tabs:RegisterEvent("PLAYER_GUILD_UPDATE")
 frame.tabs:RegisterEvent("BAG_UPDATE_DELAYED")
-pcall(frame.tabs.RegisterEvent, frame.tabs, "CHANNEL_UI_UPDATE")
+for _, event in ipairs(CHANNEL_EVENTS) do pcall(frame.tabs.RegisterEvent, frame.tabs, event) end
+local tabsPending = false
 frame.tabs:SetScript("OnEvent", function(_, event)
     if event == "BAG_UPDATE_DELAYED" and KB.page ~= "items" then return end
-    if frame:IsShown() and not KB.closing then KB:Build() end
+    if not frame:IsShown() or KB.closing or tabsPending then return end
+    tabsPending = true
+    C_Timer.After(0.2, function()
+        tabsPending = false
+        if not frame:IsShown() or KB.closing then return end
+        KB:CheckChannelTarget()
+        KB:Build()
+    end)
 end)
 
 frame.legendBar = CreateFrame("Frame", nil, frame)
@@ -767,13 +850,14 @@ local function RowWidth(row)
     return w
 end
 
-function KB:CurrentRows()
+function KB:CurrentRows(page)
+    page = page or self.page
     local layout = ns.CurrentLayout()
-    if self.page == "numpad" then return ns.NumpadRows end
-    if self.page == "symbols" then return ns.SymbolRows end
-    if self.page == "accents" then return ns.AccentRows(layout) end
-    if self.page == "quests" then return self:QuestRows() end
-    if self.page == "items" then return self:ItemRows() end
+    if page == "numpad" then return ns.NumpadRows end
+    if page == "symbols" then return ns.SymbolRows end
+    if page == "accents" then return ns.AccentRows(layout) end
+    if page == "quests" then return self:QuestRows() end
+    if page == "items" then return self:ItemRows() end
     local box = self.target
     if box and not box:IsForbidden() and ns.IsChatBox(box) then return layout.rows end
     self.plainRows = self.plainRows or {}
@@ -1120,13 +1204,36 @@ local function LinkSpans(text)
 end
 ns.LinkSpans = LinkSpans
 
+-- The typing pages share one size: switching between letters, symbols and accents never moves
+-- or resizes the keyboard (or the chat copy above it). A page with fewer rows is centred in it.
+local TYPING_PAGES = { letters = true, symbols = true, accents = true }
+local function RowsHeight(rows)
+    local h = 0
+    for i, row in ipairs(rows) do
+        h = h + (row.h or UNIT) + (i < #rows and (row.gap or GAP) or 0)
+    end
+    return h
+end
+
+function KB:GearShown()
+    return self.page ~= "quests" and self.page ~= "items"
+end
+
 function KB:Build()
     local rows = self:CurrentRows()
     self.rows = rows
     self.grid = {}
 
-    local maxW = 0
+    local maxW, rowsH = 0, RowsHeight(rows)
     for _, row in ipairs(rows) do maxW = math.max(maxW, RowWidth(row)) end
+    local areaH = rowsH
+    if TYPING_PAGES[self.page] then
+        for page in pairs(TYPING_PAGES) do
+            local other = page == self.page and rows or self:CurrentRows(page)
+            for _, row in ipairs(other) do maxW = math.max(maxW, RowWidth(row)) end
+            areaH = math.max(areaH, RowsHeight(other))
+        end
+    end
     self:RefreshLegend()
     local bar = frame.legendBar
     local copied = ns.Skin.LegendBackground(bar)
@@ -1135,7 +1242,9 @@ function KB:Build()
     bar.lineBottom:SetShown(not copied)
     frame.legend:SetFrameLevel(bar:GetFrameLevel() + 2)
     maxW = math.max(maxW, frame.legend:GetWidth() + 8)
-    self.tabWrap = maxW - (self.page == "quests" and 150 or 0)
+    local gear = self:GearShown()
+    frame.gear:SetShown(gear)
+    self.tabWrap = maxW - (self.page == "quests" and 150 or 0) - (gear and GEAR_ROOM or 0)
     self:RefreshHeader()
     local width = maxW + PAD * 2
     local headerH = HEADER_H
@@ -1144,11 +1253,7 @@ function KB:Build()
     frame.preview:SetPoint("TOPLEFT", PAD, -(PAD + headerH))
     frame.preview:SetPoint("TOPRIGHT", -PAD, -(PAD + headerH))
     local top = PAD + headerH + PREVIEW_H + 10
-    local rowsH = 0
-    for i, row in ipairs(rows) do
-        rowsH = rowsH + (row.h or UNIT) + (i < #rows and (row.gap or GAP) or 0)
-    end
-    local height = top + rowsH + PAD
+    local height = top + areaH + PAD
 
     frame:SetSize(width, height)
     frame:SetScale(ns.db and ns.db.scale or 1)
@@ -1156,7 +1261,7 @@ function KB:Build()
     ns.Skin.Inset(frame.preview)
 
     local n = 0
-    local yOff = top
+    local yOff = top + math.floor((areaH - rowsH) / 2)
     for r, row in ipairs(rows) do
         self.grid[r] = {}
         local x = (width - RowWidth(row)) / 2
@@ -1179,11 +1284,32 @@ function KB:Build()
     end
     for i = n + 1, #pool do pool[i]:Hide() end
 
-    if not self.sel or not self.grid[self.sel[1]] or not self.grid[self.sel[1]][self.sel[2]] then
+    local onGear = self.sel and self.sel[1] == 0 and gear
+    if not onGear and (not self.sel or not self.grid[self.sel[1]] or not self.grid[self.sel[1]][self.sel[2]]) then
         self.sel = { math.min(2, #rows), 1 }
     end
     self:RefreshKeys()
     self:RefreshHeader()
+end
+
+-- sel = { 0, 1 } is the settings gear.
+function KB:OnGear()
+    return self.sel and self.sel[1] == 0
+end
+
+function KB:PaintGear()
+    local g = frame.gear
+    local on = self:OnGear() and g:IsShown()
+    g.hilite:SetShown(on)
+    g.icon:SetVertexColor(on and 1 or 0.7, on and 0.9 or 0.7, on and 0.6 or 0.7)
+    if on then g.tag:SetWidth(g.tag.text:GetStringWidth() + 14) end
+    g.tag:SetShown(on)
+end
+
+-- Opens EBG's settings window over the keyboard. The keyboard lets go of the pad while the
+-- window is up and takes it back when the window closes (ns.OnSettingsOpened/Closed below).
+function KB:OpenSettings()
+    if ns.Options and ns.Options.Open then ns.Options.Open() end
 end
 
 -- Small controller glyph to the left of a key's label (quest picker navigation).
@@ -1296,6 +1422,7 @@ function KB:RefreshKeys()
             if glow then glow:SetShown(selected) elseif b.glow then b.glow:Hide() end
         end
     end
+    self:PaintGear()
     self:RefreshQuestPane()
     self:RefreshItemTooltip()
 end
@@ -1596,9 +1723,23 @@ end
 local ACTIONS = {}
 
 function ACTIONS.select(self)
+    if self:OnGear() then
+        -- From the pad the window opens on the button's release, so that release is not left
+        -- over for the window (or the game) to see.
+        ns.PlayClick()
+        if self.padButton then self.settingsOnRelease = self.padButton else self:OpenSettings() end
+        return
+    end
     local b = self.grid[self.sel[1]] and self.grid[self.sel[1]][self.sel[2]]
     if b then self:PressKey(b.key) end
 end
+
+frame.gear:SetScript("OnEnter", function() KB:SelectKey(0, 1) end)
+frame.gear:SetScript("OnClick", function()
+    KB:SelectKey(0, 1)
+    ns.PlayClick()
+    KB:OpenSettings()
+end)
 function ACTIONS.up(self) self:Move(0, -1) end
 function ACTIONS.down(self) self:Move(0, 1) end
 function ACTIONS.left(self) self:Move(-1, 0) end
@@ -1830,10 +1971,41 @@ function ACTIONS.symbols(self) self:SetPage(self.page == "symbols" and "letters"
 function ACTIONS.accents(self) self:SetPage(self.page == "accents" and "letters" or "accents") end
 function ACTIONS.letters(self) self:SetPage("letters") end
 
+local PAGE_KEYS = TYPING_PAGES -- the page keys' actions are the page names
+
+-- Picks the page key (ABC, ?123, Àé) on the new page closest to where the pressed one was:
+-- same row first, then the nearest row; across rows, the key nearest in x.
+local function PageKeyNear(grid, r, cx)
+    local bestR, bestC, bestScore
+    for ri, row in ipairs(grid) do
+        for ci, b in ipairs(row) do
+            local key = b.key
+            if type(key) == "table" and PAGE_KEYS[key.action] then
+                local score = math.abs(ri - r) * 10000 + math.abs(b.cx - cx)
+                if not bestScore or score < bestScore then bestR, bestC, bestScore = ri, ci, score end
+            end
+        end
+    end
+    return bestR, bestC
+end
+
+-- Switching between the typing pages keeps the selection on the page key just pressed, the way
+-- Shift keeps it: ?123 becomes ABC in the same spot, so a second press switches straight back.
 function KB:SetPage(page)
     if self.page == page then return end
+    local from = self.page
+    local sel = self.sel
+    local old = sel and self.grid and self.grid[sel[1]] and self.grid[sel[1]][sel[2]]
+    local keep = TYPING_PAGES[from] and TYPING_PAGES[page] and old and type(old.key) == "table" and PAGE_KEYS[old.key.action]
     self.page = page
     self.sel = nil
+    if keep then
+        local r, cx = sel[1], old.cx
+        self:Build()
+        local nr, nc = PageKeyNear(self.grid, r, cx)
+        if nr then self:SelectKey(nr, nc) end
+        return
+    end
     self:Build()
 end
 
@@ -1865,9 +2037,35 @@ function KB:SelectKey(r, c)
     self:RefreshKeys()
 end
 
+local function NearestInRow(row, cx)
+    local best, bestD = 1, math.huge
+    for i, b in ipairs(row) do
+        local d = math.abs(b.cx - cx)
+        if d < bestD then best, bestD = i, d end
+    end
+    return best
+end
+
 -- Horizontal moves wrap within the row; vertical moves pick the key whose center is nearest.
+-- The settings gear sits above the top row's last key: up from that key reaches it, down from
+-- it returns there, and up from it wraps to the bottom row. Every other top-row key wraps
+-- straight to the bottom row as before.
 function KB:Move(dx, dy)
+    if self:OnGear() then
+        if dy > 0 then
+            local row = self.grid[1]
+            self:SelectKey(1, #row)
+        elseif dy < 0 then
+            local last = #self.grid
+            self:SelectKey(last, NearestInRow(self.grid[last], frame:GetWidth()))
+        end
+        return
+    end
     local r, c = self.sel[1], self.sel[2]
+    if dy < 0 and r == 1 and c == #self.grid[1] and self:GearShown() then
+        self:SelectKey(0, 1)
+        return
+    end
     if dx ~= 0 then
         local row = self.grid[r]
         c = ((c - 1 + dx) % #row) + 1
@@ -1947,7 +2145,10 @@ frame:SetScript("OnGamePadButtonDown", function(self, button)
     elseif KB.page == "items" then
         if action == "caretleft" then action = "itemprev" elseif action == "caretright" then action = "itemnext" end
     end
-    KB:RunAction(action)
+    KB.padButton = button
+    local ok, err = pcall(KB.RunAction, KB, action)
+    KB.padButton = nil
+    if not ok then error(err, 0) end
     if REPEATABLE[action] then
         held, heldNext = action, GetTime() + REPEAT_DELAY
     end
@@ -1962,6 +2163,10 @@ frame:SetScript("OnGamePadButtonUp", function(self, button)
     if button == "PADRTRIGGER" and r2Held then
         r2Held = false
         if not r2Used and not KB.closing then KB:RunAction("submit") end
+    end
+    if KB.settingsOnRelease == button then
+        KB.settingsOnRelease = nil
+        if not KB.closing and frame:IsShown() then KB:OpenSettings() end
     end
     if KB.closing and not next(consumed) then KB:FinishClose() end
 end)
@@ -2020,7 +2225,9 @@ frame:SetScript("OnUpdate", function(self, dt)
     if IsMouseButtonDown and IsMouseButtonDown() and self:IsMouseOver() then KB.clickedAt = now end
     -- Once a click on the keyboard has cost the text field its focus, no focus event will close
     -- the keyboard any more, so a click anywhere outside it does.
-    if KB.detached and not KB.closing and IsMouseButtonDown and IsMouseButtonDown() and not self:IsMouseOver() then
+    -- Clicks in EBG's settings window (opened from the gear) do not count as outside.
+    local inSettings = ns.Options and ns.Options.IsMouseOver and ns.Options.IsMouseOver()
+    if KB.detached and not KB.closing and not inSettings and IsMouseButtonDown and IsMouseButtonDown() and not self:IsMouseOver() then
         ns.HideKeyboard()
         return
     end
@@ -2062,7 +2269,10 @@ end)
 
 -- Input capture is protected in combat; fall back to mouse only until combat ends.
 local captureWanted = false
+local function SettingsOpen() return ns.Options and ns.Options.IsShown and ns.Options.IsShown() end
 local function Capture(on)
+    -- While EBG's settings window is up it has the pad; the keyboard takes it back on close.
+    if on and SettingsOpen() then on = false end
     captureWanted = on
     if InCombatLockdown() then
         KB.combatLocked = on
@@ -2087,6 +2297,22 @@ end
 
 function ns.OnCombatEnd()
     Capture(frame:IsShown() and not KB.closing)
+end
+
+-- The settings window takes the pad from the keyboard while it is open (see Options.lua).
+function ns.OnSettingsOpened()
+    held, stickDir, rstickDir, mirrorDir = nil, nil, nil, nil
+    r2Held = false
+    wipe(consumed)
+    KB.settingsOnRelease = nil
+    if frame:IsShown() then Capture(false) end
+end
+
+function ns.OnSettingsClosed()
+    if not frame:IsShown() or KB.closing then return end
+    Capture(true)
+    -- Settings may have changed the layout, skin or scale.
+    KB:Build()
 end
 
 function ns.OnCombatStart()
@@ -2181,6 +2407,8 @@ function ns.ShowKeyboard(manual, forced)
         return
     end
     ns.dismissedBox = nil
+    -- A fresh open starts on the keys, not on the settings gear left selected last time.
+    if not frame:IsShown() and KB:OnGear() then KB.sel = nil end
     KB:SetTarget(box)
     if not frame:IsShown() then
         frame:SetAlpha(1)
@@ -2329,7 +2557,8 @@ function ns.RebuildKeyboard(resetKeys)
         for _, b in ipairs(pool) do b:Hide(); b:SetParent(nil) end
         wipe(pool)
     end
-    KB.sel = nil
+    -- Selection stays on the gear when a change made in the settings window rebuilds the keys.
+    if not KB:OnGear() then KB.sel = nil end
     KB:Build()
 end
 

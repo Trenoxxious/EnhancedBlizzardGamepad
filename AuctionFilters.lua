@@ -95,7 +95,7 @@ function Filters.ActiveCount()
     if Filters.maxLevel > 0 then count = count + 1 end
     return count
 end
--- Whether the chosen category holds gear, where sorting by item level is offered.
+-- Whether the chosen category holds gear, where the required-level column and sort are offered.
 function Filters.IsEquipment()
     local node = Filters.category
     while node do
@@ -106,16 +106,64 @@ function Filters.IsEquipment()
     end
     return false
 end
+-- The level range means the level required to use the item ("Requires Level N"), not item level.
+-- The modern browse query's own minLevel/maxLevel are matched against item level on Forever, so
+-- they are sent as 0 (any) and AuctionData filters the browse results here instead. The legacy
+-- QueryAuctionItems takes the required level itself, so it still gets the range directly.
+function Filters.LevelActive()
+    return Filters.minLevel > 0 or Filters.maxLevel > 0
+end
+function Filters.LevelMatches(level)
+    if Filters.minLevel > 0 and level < Filters.minLevel then return false end
+    if Filters.maxLevel > 0 and level > Filters.maxLevel then return false end
+    return true
+end
+-- An item's required level (0 when it has none), or nil while its data is not loaded yet; the
+-- load is then requested, and GET_ITEM_INFO_RECEIVED brings the answer (see AuctionData).
+function Filters.RequiredLevel(itemID)
+    local get = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+    if not get or not itemID then return nil end
+    local ok, name, _, _, _, minLevel = pcall(get, itemID)
+    if ok and name then return minLevel or 0 end
+    if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, itemID) end
+    return nil
+end
+-- Whether the current sort runs highest first. Price starts cheapest first; Level starts at the
+-- highest required level, the useful end when shopping for gear. Pressing the header flips it.
+function Filters.Descending()
+    return (Filters.sort == "Level") ~= (Filters.reverse == true)
+end
+-- The Level column is the required level, which the server cannot sort by (its Level sort is item
+-- level, and on Forever it does not reorder the results at all). Browse rows are therefore sorted
+-- here: by required level, unknown levels last, then cheapest first. Only loaded rows can be
+-- sorted; rows that Next loads are sorted in with them.
+function Filters.SortByLevel(rows)
+    local down = Filters.Descending()
+    table.sort(rows, function(a, b)
+        local la, lb = a.required, b.required
+        if la ~= lb then
+            if la == nil then return false end
+            if lb == nil then return true end
+            if down then return la > lb end
+            return la < lb
+        end
+        local pa, pb = a.price or 0, b.price or 0
+        if pa ~= pb then return pa < pb end
+        return tostring(a.identity or "") < tostring(b.identity or "")
+    end)
+end
 function Filters.Query(text)
     local enabled = {}
     for id, on in pairs(Filters.selected) do if on then enabled[#enabled + 1] = id end end
     if Filters.category and Filters.category.implicit and not Filters.selected[Filters.category.implicit] then
         enabled[#enabled + 1] = Filters.category.implicit
     end
+    -- The server's own sort is still requested (reverseSort meaning highest first), so with more
+    -- results than one load the first loads lean the right way; SortByLevel then orders them.
     local order = Enum and Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder[Filters.sort]
-    return { searchString = text, minLevel = Filters.minLevel, maxLevel = Filters.maxLevel,
+    return { searchString = text, minLevel = 0, maxLevel = 0,
         filters = enabled, itemClassFilters = Filters.category and CopyClassFilters(Filters.category.filters) or nil,
-        sorts = order and {{ sortOrder = order, reverseSort = Filters.reverse }} or {} }
+        sorts = order and {{ sortOrder = order, reverseSort = Filters.Descending() }} or {} }
 end
 function Filters.Legacy()
     local enum = Enum and Enum.AuctionHouseFilter or {}

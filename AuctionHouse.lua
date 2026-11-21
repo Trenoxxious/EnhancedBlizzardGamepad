@@ -21,7 +21,10 @@ local consumed, closing, capturing = {}, false, false
 local wasBusy = false -- a search was in progress at the last redraw
 local releaseAction
 local Refresh, Activate, SwitchTab, SearchInput
-local function KeyboardOpen() return ns.KB and ns.KB.frame:IsShown() end
+-- The keyboard or EBG's settings window is up and has the pad; the browser waits until it closes.
+local function KeyboardOpen()
+    return (ns.KB and ns.KB.frame:IsShown()) or (ns.Options and ns.Options.IsShown and ns.Options.IsShown()) or false
+end
 -- System buttons the browser never keeps from the game.
 local PASS_THROUGH = { PADSYSTEM = true, PADFORWARD = true, PADBACK = true, PADSOCIAL = true }
 local function Escape(text) return tostring(text or ""):gsub("|", "||") end
@@ -59,12 +62,124 @@ local function Quantity(value)
     until changed == 0
     return text
 end
+-- Character preview: the focused item tried on a model of your character, in the preview pane in
+-- place of its tooltip. R3 switches the pane between the two, and the choice is kept while the
+-- browser is open; items that cannot be shown on a character (rings, potions...) always show their
+-- tooltip. The model is EBG's own DressUpModel, so Blizzard's dressing room is never opened.
+local previewOnCharacter = false
+local previewStickX -- right stick turning the model, while the model is shown
+local function TryOnLink(item)
+    if not item then return end
+    local link = item.link
+    if type(link) == "string" and link:find("item:%d") then return link end
+    if item.itemID then return "item:" .. item.itemID end
+end
+local function Dressable(item)
+    local link = TryOnLink(item)
+    if not link then return false end
+    local id = item.itemID or tonumber(link:match("item:(%d+)"))
+    if C_Item and C_Item.IsDressableItemByID and id then
+        local ok, yes = pcall(C_Item.IsDressableItemByID, id)
+        if ok then return yes and true or false end
+    end
+    if IsDressableItem then
+        local ok, yes = pcall(IsDressableItem, link)
+        if ok then return yes and true or false end
+    end
+    local equippable = (C_Item and C_Item.IsEquippableItem) or IsEquippableItem
+    if equippable then
+        local ok, yes = pcall(equippable, link)
+        return ok and yes and true or false
+    end
+    return false
+end
+-- Comparison: under an equipment tooltip, the item(s) you wear in that slot, each headed
+-- "Equipped" and ending with what would change if you swapped (stats from GetItemStats). The
+-- slots come from the item's equip location: both rings, both trinkets, both hands for a one-hand
+-- weapon, main and off hand for a two-hander.
+local COMPARE_SLOTS = {
+    INVTYPE_HEAD = { 1 }, INVTYPE_NECK = { 2 }, INVTYPE_SHOULDER = { 3 }, INVTYPE_BODY = { 4 },
+    INVTYPE_CHEST = { 5 }, INVTYPE_ROBE = { 5 }, INVTYPE_WAIST = { 6 }, INVTYPE_LEGS = { 7 },
+    INVTYPE_FEET = { 8 }, INVTYPE_WRIST = { 9 }, INVTYPE_HAND = { 10 }, INVTYPE_FINGER = { 11, 12 },
+    INVTYPE_TRINKET = { 13, 14 }, INVTYPE_CLOAK = { 15 }, INVTYPE_WEAPON = { 16, 17 },
+    INVTYPE_2HWEAPON = { 16, 17 }, INVTYPE_WEAPONMAINHAND = { 16 }, INVTYPE_WEAPONOFFHAND = { 17 },
+    INVTYPE_SHIELD = { 17 }, INVTYPE_HOLDABLE = { 17 }, INVTYPE_RANGED = { 18 },
+    INVTYPE_RANGEDRIGHT = { 18 }, INVTYPE_THROWN = { 18 }, INVTYPE_RELIC = { 18 }, INVTYPE_TABARD = { 19 },
+}
+local function EquippedFor(item)
+    local info = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+    local id = item and (item.itemID or (type(item.link) == "string" and tonumber(item.link:match("item:(%d+)"))))
+    if not info or not id or not GetInventoryItemLink then return {} end
+    local ok, _, _, _, equipLoc = pcall(info, id)
+    local out = {}
+    for _, slot in ipairs(ok and COMPARE_SLOTS[equipLoc] or {}) do
+        local link = GetInventoryItemLink("player", slot)
+        if link then out[#out + 1] = { slot = slot, link = link } end
+    end
+    return out
+end
+-- What changes if the equipped item is replaced by the new one: stat name and difference, gains
+-- first. Stats without a display name (internal keys) are left out.
+local function StatDiff(newLink, oldLink)
+    local get = (C_Item and C_Item.GetItemStats) or GetItemStats
+    if not get or not newLink or not oldLink then return nil end
+    local ok1, new = pcall(get, newLink)
+    local ok2, old = pcall(get, oldLink)
+    if not ok1 or not ok2 then return nil end
+    new, old = type(new) == "table" and new or {}, type(old) == "table" and old or {}
+    local keys, out = {}, {}
+    for k in pairs(new) do keys[k] = true end
+    for k in pairs(old) do keys[k] = true end
+    for k in pairs(keys) do
+        local delta, name = (new[k] or 0) - (old[k] or 0), _G[k]
+        if math.abs(delta) > 0.05 and type(name) == "string" then out[#out + 1] = { name = name, delta = delta } end
+    end
+    table.sort(out, function(a, b)
+        if (a.delta > 0) ~= (b.delta > 0) then return a.delta > 0 end
+        return a.name < b.name
+    end)
+    return out
+end
+Auction.StatDiff = StatDiff
+-- The sticks are taken only while the character model is on screen and the browser has the pad:
+-- the right stick turns the model, and the left stick is passed on so it still moves you.
+local sticks = false
+local function StickCapture(want)
+    want = want and capturing and frame and frame.model and frame.model:IsShown() and true or false
+    if not want then previewStickX = nil end
+    if not InCombatLockdown() and frame and sticks ~= want then
+        if pcall(frame.EnableGamePadStick, frame, want) then sticks = want end
+    end
+    -- The turn indicator on the model shows exactly while the right stick can turn it. Its glyph
+    -- is bound each time it appears, so it follows the controller in use.
+    local hint = frame and frame.model and frame.model.turnHint
+    if hint and hint:IsShown() ~= sticks then
+        if sticks then
+            -- The chat copy's right stick glyph (same atlas, same call). Where the atlas cannot be
+            -- found, Blizzard's own icon frame draws the stick instead, as the legend bar's do;
+            -- text is the very last resort (Inline still tries Blizzard's drawn icon first).
+            local glyph = ns.Glyphs.Apply(hint.stick, "RSTICKMOVE")
+            local native = false
+            if hint.native then
+                native = not glyph and ns.Glyphs.BindNativeIcon(hint.native, "PADRSTICK") or false
+                hint.native:SetShown(native)
+            end
+            hint.text:SetShown(not glyph and not native)
+            if not glyph and not native then hint.text:SetText(ns.Glyphs.Inline("PADRSTICK", 24)) end
+            hint.lit = nil
+        end
+        hint:SetShown(sticks)
+    end
+end
 local function Capture(want)
-    if InCombatLockdown() or not frame or capturing == want then return end
-    if ns.NoteAction then ns.NoteAction("auction pad capture " .. (want and "on" or "off")) end
-    frame:EnableGamePadButton(want)
-    frame:SetPropagateKeyboardInput(true)
-    capturing = want
+    if InCombatLockdown() or not frame then return end
+    if capturing ~= want then
+        if ns.NoteAction then ns.NoteAction("auction pad capture " .. (want and "on" or "off")) end
+        frame:EnableGamePadButton(want)
+        frame:SetPropagateKeyboardInput(true)
+        capturing = want
+    end
+    StickCapture(true)
 end
 local placement
 local function PlaceOverNative()
@@ -188,36 +303,100 @@ local function Select(index)
     end
     local b = controls[focus]
     local item = not filterMode and b and b.item or nil
-    -- The preview pane shows only the focused item's tooltip and its quantity; with no item it
-    -- fades to a faint outline. A tall or wide tooltip is scaled down to fit the pane.
+    -- The preview pane shows the focused item's tooltip (with the equipped item(s) for its slot
+    -- underneath, to compare), or (R3) the item on your character, and its quantity; with no item
+    -- it fades to a faint outline. The stack of tooltips is scaled down together to fit the pane.
     tooltip:Hide()
-    local shown = false
+    for _, t in ipairs(frame.compare) do t:Hide() end
+    local shown, onModel = false, false
+    local last = tooltip -- the lowest tooltip shown, for the quantity line
     -- Tooltips draw above every other frame, so the preview's is left out while a trade panel
-    -- (sell, buy or cancel) is open over the browser; it returns when the panel closes.
+    -- (sell, buy or cancel) is open over the browser; it returns when the panel closes. The
+    -- character model steps aside with it.
     local trading = ns.AuctionTransactions and ns.AuctionTransactions.current
-    if item and (item.link or item.itemID) and not trading then
+    local dressable = item and not trading and Dressable(item) or false
+    if dressable and previewOnCharacter then onModel = Auction.ShowOnCharacter(item) end
+    if not onModel and frame.model then frame.model:Hide() frame.model.link = nil end
+    StickCapture(true)
+    if item and (item.link or item.itemID) and not trading and not onModel then
         tooltip:SetOwner(frame, "ANCHOR_NONE")
         tooltip:SetScale(1)
         tooltip:ClearAllPoints()
         tooltip:SetPoint("TOPLEFT", frame, "TOPLEFT", 790, -104)
-        local ok = pcall(tooltip.SetHyperlink, tooltip, item.link or ("item:" .. item.itemID))
+        local link = item.link or ("item:" .. item.itemID)
+        local ok = pcall(tooltip.SetHyperlink, tooltip, link)
         if ok and (not tooltip.NumLines or tooltip:NumLines() > 0) then
             tooltip:Show()
-            local w, h = tooltip:GetWidth() or 0, tooltip:GetHeight() or 0
-            local scale = math.min(1, w > 0 and 280 / w or 1, h > 0 and 380 / h or 1)
-            tooltip:SetScale(scale)
-            tooltip:ClearAllPoints()
-            tooltip:SetPoint("TOPLEFT", frame, "TOPLEFT", 790 / scale, -104 / scale)
             shown = true
+            local stack = { tooltip }
+            -- Equipped item(s) for the same slot, each under an "Equipped" heading, ending with the
+            -- stat changes a swap would make (green gains, red losses).
+            for i, worn in ipairs(EquippedFor(item)) do
+                local t = frame.compare[i]
+                if not t then break end
+                t:SetOwner(frame, "ANCHOR_NONE")
+                t:SetScale(1)
+                t:ClearAllPoints()
+                t:SetPoint("TOPLEFT", frame, "TOPLEFT", 790, -104)
+                if pcall(t.SetInventoryItem, t, "player", worn.slot) and (not t.NumLines or t:NumLines() > 0) then
+                    local diff = StatDiff(TryOnLink(item) or link, worn.link)
+                    if diff and #diff > 0 then
+                        pcall(t.AddLine, t, " ")
+                        pcall(t.AddLine, t, "If you replace this item:", 1, 0.82, 0)
+                        for _, d in ipairs(diff) do
+                            local amount = d.delta == math.floor(d.delta) and ("%+d"):format(d.delta) or ("%+.1f"):format(d.delta)
+                            local r, g, bl = 0.1, 1, 0.1
+                            if d.delta < 0 then r, g, bl = 1, 0.15, 0.15 end
+                            pcall(t.AddLine, t, amount .. " " .. d.name, r, g, bl)
+                        end
+                    end
+                    t:Show()
+                    stack[#stack + 1] = t
+                end
+            end
+            -- One scale for the whole stack, so it fits the pane (280 wide, about 400 tall with the
+            -- headings and the gaps between tooltips).
+            local GAP = 22 -- room for an "Equipped" heading above each comparison tooltip
+            local width, height = 0, 0
+            for i, t in ipairs(stack) do
+                width = math.max(width, t:GetWidth() or 0)
+                height = height + (t:GetHeight() or 0) + (i > 1 and GAP or 0)
+            end
+            local scale = math.min(1, width > 0 and 280 / width or 1, height > 0 and 400 / height or 1)
+            for i, t in ipairs(stack) do
+                t:SetScale(scale)
+                t:ClearAllPoints()
+                if i == 1 then t:SetPoint("TOPLEFT", frame, "TOPLEFT", 790 / scale, -104 / scale)
+                else t:SetPoint("TOPLEFT", stack[i - 1], "BOTTOMLEFT", 0, -GAP) end
+            end
+            last = stack[#stack]
         end
     end
-    frame.detailIcon:SetShown(item and not shown and item.icon ~= nil or false)
+    frame.detailIcon:SetShown(item and not shown and not onModel and item.icon ~= nil or false)
     if item and item.icon then frame.detailIcon:SetTexture(item.icon) end
     frame.previewQuantity:SetText(item and item.count and ("Quantity: " .. Quantity(item.count)) or "")
     frame.previewQuantity:ClearAllPoints()
-    if shown then frame.previewQuantity:SetPoint("TOPLEFT", tooltip, "BOTTOMLEFT", 6, -8)
+    if onModel then frame.previewQuantity:SetPoint("TOPLEFT", 798, -500)
+    elseif shown then frame.previewQuantity:SetPoint("TOPLEFT", last, "BOTTOMLEFT", 6, -8)
     else frame.previewQuantity:SetPoint("TOPLEFT", 798, item and item.icon and -170 or -112) end
+    -- R3 is offered only for an item that can be shown on a character (turning is shown on the model).
+    local legend = { { "PAD1", "Select" }, { "PADDPAD", "Navigate" } }
+    if dressable then legend[#legend + 1] = { "PADRSTICK", onModel and "Tooltip" or "On character" } end
+    local key = (dressable and "d" or "") .. (onModel and "m" or "")
+    if frame.legendKey ~= key then frame.legendKey = key frame.legendBar:SetItems(legend) end
     frame.detailPane:SetAlpha(item and 1 or 0.25)
+end
+-- R3, or the middle mouse button (for testing with a mouse; not shown anywhere): the focused item
+-- on your character, or back to its tooltip. Only for an item that can be shown on a character,
+-- so the switch never happens unseen.
+local function CanPreview()
+    local b = controls[focus]
+    return not filterMode and b and b.item and Dressable(b.item) or false
+end
+local function TogglePreview()
+    if not CanPreview() then return end
+    previewOnCharacter = not previewOnCharacter
+    Select(focus)
 end
 local function Button(label, x, y, w, h, action, role, group)
     local b = Style.Control(frame, role)
@@ -232,6 +411,12 @@ local function Button(label, x, y, w, h, action, role, group)
     end)
     b:SetScript("OnClick", function(self)
         if not InCombatLockdown() and not KeyboardOpen() and not closing and not self.disabled then Style.Press(self) self.action() end
+    end)
+    -- Middle-clicking a row does what R3 does. (OnClick only hears the left button.)
+    b:SetScript("OnMouseUp", function(self, button)
+        if button ~= "MiddleButton" or not self.item or InCombatLockdown() or KeyboardOpen() or closing then return end
+        for i, control in ipairs(controls) do if control == self then Select(i) break end end
+        TogglePreview()
     end)
     return b
 end
@@ -454,8 +639,86 @@ local function Create()
         b.note:Hide()
         buttons[i] = b
     end
+    -- The character preview (R3): EBG's own DressUpModel over the preview pane, hidden until asked
+    -- for. Dragging it with the mouse or holding the right stick turns it.
+    local okModel, model = pcall(CreateFrame, "DressUpModel", nil, frame)
+    if okModel and model then
+        model:SetPoint("TOPLEFT", 786, -100)
+        model:SetSize(288, 390)
+        model:SetFrameLevel(frame:GetFrameLevel() + 2)
+        model:EnableMouse(true)
+        model:Hide()
+        model.facing = 0
+        model:SetScript("OnMouseDown", function(self, button) if button == "LeftButton" then self.dragX = GetCursorPosition() end end)
+        model:SetScript("OnMouseUp", function(self, button)
+            self.dragX = nil
+            -- Middle-clicking the model itself also returns to the tooltip, as R3 does.
+            if button == "MiddleButton" and not InCombatLockdown() and not KeyboardOpen() then TogglePreview() end
+        end)
+        model:SetScript("OnHide", function(self) self.dragX = nil end)
+        model:SetScript("OnUpdate", function(self, dt)
+            local turn = 0
+            if self.dragX then
+                local x = GetCursorPosition()
+                turn, self.dragX = (x - self.dragX) * 0.015, x
+            end
+            if previewStickX then turn = turn + previewStickX * dt * 3 end
+            -- The indicator's arrow on the side being turned toward lights up.
+            local hint = self.turnHint
+            if hint and hint:IsShown() then
+                local lit = previewStickX and (previewStickX < 0 and -1 or 1) or 0
+                if hint.lit ~= lit then
+                    hint.lit = lit
+                    for side, arrow in pairs({ [-1] = hint.left, [1] = hint.right }) do
+                        if side == lit then arrow:SetVertexColor(1, 0.82, 0.35) arrow:SetAlpha(1)
+                        else arrow:SetVertexColor(1, 1, 1) arrow:SetAlpha(0.7) end
+                    end
+                end
+            end
+            if turn ~= 0 then
+                self.facing = self.facing + turn
+                pcall(self.SetFacing, self, self.facing)
+            end
+        end)
+        -- The model loads after SetUnit; the item is tried on again once it has.
+        pcall(model.SetScript, model, "OnModelLoaded", function(self)
+            pcall(self.SetFacing, self, self.facing)
+            if self.link then pcall(self.Dress, self) pcall(self.TryOn, self, self.link) end
+        end)
+        -- Turn indicator, bottom centre of the model: the right stick glyph between a left and a
+        -- right arrow. Shown only while the right stick turns the model (see StickCapture).
+        local hint = CreateFrame("Frame", nil, model, "BackdropTemplate")
+        hint:SetSize(92, 32)
+        hint:SetPoint("BOTTOM", model, "BOTTOM", 0, 4)
+        hint:SetFrameLevel(model:GetFrameLevel() + 2)
+        hint.bg = hint:CreateTexture(nil, "BACKGROUND")
+        hint.bg:SetAllPoints()
+        hint.bg:SetColorTexture(0, 0, 0, 0.55)
+        hint.stick = hint:CreateTexture(nil, "ARTWORK")
+        hint.stick:SetSize(26, 26)
+        hint.stick:SetPoint("CENTER")
+        hint.native = ns.Glyphs.CreateNativeIcon(hint) or nil
+        if hint.native then
+            hint.native:SetSize(26, 25)
+            hint.native:SetPoint("CENTER")
+            hint.native:Hide()
+        end
+        hint.text = hint:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        hint.text:SetPoint("CENTER")
+        hint.left = hint:CreateTexture(nil, "ARTWORK")
+        hint.left:SetSize(24, 24)
+        hint.left:SetPoint("RIGHT", hint.stick, "LEFT", -4, 0)
+        hint.left:SetTexture("Interface\\Buttons\\UI-SpellbookIcon-PrevPage-Up")
+        hint.right = hint:CreateTexture(nil, "ARTWORK")
+        hint.right:SetSize(24, 24)
+        hint.right:SetPoint("LEFT", hint.stick, "RIGHT", 4, 0)
+        hint.right:SetTexture("Interface\\Buttons\\UI-SpellbookIcon-NextPage-Up")
+        hint:Hide()
+        model.turnHint = hint
+        frame.model = model
+    end
     -- Sortable column headers, as in Blizzard's results list: press one to sort by it, press it
-    -- again to reverse. Level appears for gear.
+    -- again to reverse. Req. Level (the level required to use the item) appears for gear.
     frame.sortHeaders = {}
     local function Header(key, label, x, w, justify)
         local h = Button(label, x, -175, w, 26, function() SortBy(key) end, "header", "header")
@@ -476,7 +739,7 @@ local function Create()
     end
     frame.sortPrice = Header("Price", "Price", 216, 144, "RIGHT")
     frame.sortName = Header("Name", "Name", 362, 300, "LEFT")
-    frame.sortLevel = Header("Level", "Level", 594, 64, "RIGHT")
+    frame.sortLevel = Header("Level", "Req. Level", 584, 74, "RIGHT") -- the level required to use the item
     -- One-page filters: level range, then checkboxes grouped as in Blizzard's filter menu.
     frame.filterHeadings = {}
     for i = 1, 3 do
@@ -499,6 +762,22 @@ local function Create()
     frame.previous = Button("Previous", 222, -510, 94, 26, function() Auction.Page(-1) end, "secondary", "paging")
     frame.next = Button("Next", 326, -510, 94, 26, function() Auction.Page(1) end, "secondary", "paging")
     frame.native = Button("Close auction house", 898, -558, 178, 34, function() Auction.Exit() end, "secondary", "utility")
+    -- Settings: a small gear key beside Close, reached by moving left from Close. The window
+    -- takes the pad while it is open; the browser takes it back on its next tick after it closes.
+    frame.settings = Button("", 854, -558, 36, 34, function()
+        if not ns.Options or not ns.Options.Open then return end
+        Capture(false)
+        wipe(consumed)
+        releaseAction = nil
+        ns.Options.Open()
+    end, "secondary", "utility")
+    frame.settings.icon = frame.settings:CreateTexture(nil, "OVERLAY")
+    frame.settings.icon:SetSize(20, 20)
+    frame.settings.icon:SetPoint("CENTER", 0, 0)
+    if not (ns.SetGearIcon and ns.SetGearIcon(frame.settings.icon)) then
+        frame.settings.icon:Hide()
+        frame.settings.text:SetText("Set")
+    end
     frame.page = Label("GameFontDisableSmall", 434, -518, 322)
     -- frame.note = Label("GameFontDisableSmall", 30, -638, 1030,
     --     "Select a listing to buy or bid. Sell lists auctionable bag items. Every transaction requires confirmation.")
@@ -509,6 +788,18 @@ local function Create()
     ns.Skin.DockBar(frame.legendBar, frame, "BOTTOM")
     tooltip = CreateFrame("GameTooltip", "EBGAuctionItemTooltip", frame, "GameTooltipTemplate")
     tooltip:SetClampedToScreen(true)
+    -- The comparison tooltips under the item's own (see Select), each with its "Equipped" heading
+    -- drawn just above its top edge.
+    frame.compare = {}
+    for i = 1, 2 do
+        local t = CreateFrame("GameTooltip", "EBGAuctionCompareTooltip" .. i, frame, "GameTooltipTemplate")
+        t:SetClampedToScreen(true)
+        t.heading = t:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        t.heading:SetPoint("BOTTOMLEFT", t, "TOPLEFT", 6, 3)
+        t.heading:SetText("Equipped")
+        t:Hide()
+        frame.compare[i] = t
+    end
     frame:SetScript("OnGamePadButtonDown", function(self, key)
         if InCombatLockdown() or KeyboardOpen() then return end
         self:SetPropagateKeyboardInput(false)
@@ -553,6 +844,8 @@ local function Create()
             releaseAction = b and not b.disabled and { key, function() Style.Press(b) b.action() end } or nil
         elseif key == "PAD3" then releaseAction = { key, SearchInput }
         elseif key == "PAD4" then releaseAction = { key, frame.refresh.action }
+        elseif key == "PADRSTICK" then
+            if CanPreview() then releaseAction = { key, TogglePreview } end
         elseif key == "PAD2" then
             releaseAction = { key, function()
                 if filterMode then filterMode, page = false, 1 Refresh()
@@ -573,7 +866,57 @@ local function Create()
         end
         if closing and not next(consumed) then FinishClose() end
     end)
-    frame:SetScript("OnHide", function() tooltip:Hide() end)
+    -- Sticks reach the browser only while the character model is shown (StickCapture): the right
+    -- stick turns the model; the left stick goes on to the game, so it still moves you.
+    -- Only the left stick (and the "Movement" stick the game derives from it) is passed on; the
+    -- right stick and anything the game derives from it (camera) stay here, so turning the model
+    -- never swings the camera as well.
+    frame:SetScript("OnGamePadStick", function(self, stick, x)
+        if InCombatLockdown() then return end
+        if stick == "Left" or stick == "Movement" then self:SetPropagateKeyboardInput(true) return end
+        self:SetPropagateKeyboardInput(false)
+        if stick == "Right" then
+            previewStickX = self.model and self.model:IsShown() and math.abs(x or 0) >= 0.2 and x or nil
+        end
+    end)
+    frame:SetScript("OnHide", function() Auction.HidePreview() end)
+end
+-- The focused item on a model of your character: dressed in what you wear, then the item tried on.
+-- The model is set to your character once per browser opening (so gear changed since is shown).
+function Auction.ShowOnCharacter(item)
+    local m = frame and frame.model
+    local link = TryOnLink(item)
+    if not m or not link then return false end
+    if not m.unitSet then
+        m:Show() -- a hidden model may not load its unit
+        if not pcall(m.SetUnit, m, "player") then m:Hide() return false end
+        m.unitSet = true
+        pcall(m.SetFacing, m, m.facing)
+    elseif m:IsShown() and m.link == link then
+        return true -- already wearing it (a redraw, not a new item): no re-dress flicker
+    end
+    m:Show()
+    m.link = link
+    pcall(m.Dress, m)
+    return pcall(m.TryOn, m, link) and true or false
+end
+-- The glyph family changed (Button glyphs setting): redraw the glyphs on the browser's keys, its
+-- legend and search field (Refresh), and the turn indicator the next time it shows.
+function Auction.RefreshGlyphs()
+    if not frame then return end
+    for _, b in ipairs({ frame.refresh, frame.back, frame.filterApply, frame.previous, frame.next, frame.native }) do
+        if b and b.glyphButton then Style.Glyph(b, b.glyphButton) end
+    end
+    local hint = frame.model and frame.model.turnHint
+    if hint and hint:IsShown() then hint:Hide() StickCapture(true) end
+    Refresh()
+end
+-- Hides the tooltip and the character model (a trade panel opening over the browser, or closing).
+function Auction.HidePreview()
+    if tooltip then tooltip:Hide() end
+    for _, t in ipairs(frame and frame.compare or {}) do t:Hide() end
+    if frame and frame.model then frame.model:Hide() frame.model.link = nil end
+    StickCapture(false)
 end
 Refresh = function()
     if not frame or not frame:IsShown() or closing then return end
@@ -610,7 +953,7 @@ Refresh = function()
     frame.sidebarHelp:SetShown(not browsing)
     frame.browseReturn:SetShown(not browsing and tab ~= 1)
     frame.sidebarHelp:SetText(details and "You are viewing listings for one item.\n\nUse < Results to return to your search.\n\nPrices and quantities belong to each listing." or
-        (filterMode and "Change the options you need, then Apply search.\n\nFilters affect auction searches. Level 0 means any level." or
+        (filterMode and "Change the options you need, then Apply search.\n\nFilters affect auction searches. Level means the level required to use the item; 0 means any." or
         (tab == 2 and "Auctionable items in your bags.\n\nChoose an item, set quantity and price, then review its deposit before posting." or
         "Your listed auctions.\n\nSelect a listing to review cancellation and any fee.\n\nSold auctions are greyed out until their gold reaches your mailbox.")))
     -- With a category picked the list shows only its own path and its subcategories; the Back
@@ -673,7 +1016,7 @@ Refresh = function()
     end
     if frame.browseReturn:IsShown() then controls[#controls + 1] = frame.browseReturn end
     frame.categorySummary:SetShown(browsing)
-    frame.legendBar:SetItems({ { "PAD1", "Select" }, { "PADDPAD", "Navigate" } })
+    frame.legendKey = nil -- the legend bar is redrawn by Select below (glyphs follow controller changes)
     -- Glyphs on the buttons their controller shortcut presses.
     local function Mark(b, button) if b.glyphButton ~= button then Style.Glyph(b, button) end end
     -- LB / RB switch tabs: shown once, beside the tab row, so the tabs themselves never shift.
@@ -691,8 +1034,8 @@ Refresh = function()
         for _, r in ipairs(rows) do if r.level then showLevel = true break end end
     end
     frame.sortLevel.hidden = not showLevel
-    frame.sortName:SetWidth(showLevel and 230 or 300)
-    frame.sortName.w = showLevel and 230 or 300
+    frame.sortName:SetWidth(showLevel and 220 or 300)
+    frame.sortName.w = showLevel and 220 or 300
     for _, h in ipairs(frame.sortHeaders) do
         local shown = sortable and not h.hidden
         h:SetShown(shown)
@@ -700,7 +1043,7 @@ Refresh = function()
             h.active = ns.AuctionFilters.sort == h.sortKey
             h.text:SetText(h.label)
             h.arrow:SetShown(h.active)
-            if ns.AuctionFilters.reverse then h.arrow:SetTexCoord(0, 0.5625, 1, 0) else h.arrow:SetTexCoord(0, 0.5625, 0, 1) end
+            if ns.AuctionFilters.Descending() then h.arrow:SetTexCoord(0, 0.5625, 1, 0) else h.arrow:SetTexCoord(0, 0.5625, 0, 1) end
             controls[#controls + 1] = h
         end
     end
@@ -713,7 +1056,7 @@ Refresh = function()
         filterControls[#filterControls + 1] = frame.levelMin
         filterControls[#filterControls + 1] = frame.levelMax
         local groups = f.Groups(Data.backend ~= "modern")
-        local headings = { { "Level range", 226, -186 } }
+        local headings = { { "Required level", 226, -186 } }
         -- General options under the level range on the left; rarity in its own column.
         local columns = { { x = 226, y = -270 }, { x = 498, y = -208 } }
         local used = 0
@@ -871,17 +1214,19 @@ Refresh = function()
     end
     lastResult = #controls
     -- The filter page fits on one page, so it has no paging.
-    frame.previous:SetShown(not filterMode)
-    frame.next:SetShown(not filterMode)
-    frame.page:SetShown(not filterMode)
+    local paged = not filterMode
+    frame.previous:SetShown(paged)
+    frame.next:SetShown(paged)
+    frame.page:SetShown(paged)
     -- Paging keys are greyed out when there is no page in that direction (the same tests as Auction.Page).
     local pages = math.max(1, math.ceil(#rows / 7))
     frame.previous.disabled = Data.busy or not (page > 1 or (tab == 1 and Data.backend == "legacy" and (Data.page or 0) > 0))
     frame.next.disabled = Data.busy or not (page < pages or (tab == 1 and Data.more))
-    if not filterMode then
+    if paged then
         controls[#controls + 1] = frame.previous
         controls[#controls + 1] = frame.next
     end
+    controls[#controls + 1] = frame.settings
     controls[#controls + 1] = frame.native
     frame.page:SetText(("Page %d / %d%s"):format(page, math.max(1, math.ceil(#rows / 7)),
         tab == 1 and not filterMode and Data.more and " - Next loads more" or ""))
@@ -898,17 +1243,17 @@ end
 Activate = function(item)
     if filterMode then return -- the filter page uses its own controls
     elseif tab == 2 then
-        tooltip:Hide()
+        Auction.HidePreview()
         ns.AuctionTransactions.Open("sell",item)
     elseif tab == 1 and Data.mode == "browse" and item.itemKey then
         if Data.Details(item) then page, focus = 1, firstResult end
         Refresh()
     elseif tab == 1 and Data.mode == "details" then
-        tooltip:Hide()
+        Auction.HidePreview()
         ns.AuctionTransactions.Open("buy",item)
     elseif tab == 3 and not item.sold then
         -- A sold auction cannot be cancelled; it only waits for its gold to be mailed.
-        tooltip:Hide()
+        Auction.HidePreview()
         ns.AuctionTransactions.Open("cancel",item)
     end
 end
@@ -943,13 +1288,19 @@ end
 function Auction.ResumeInput()
     if frame and frame:IsShown() and not closing then Capture(ns.IsGamepadActive() and not KeyboardOpen()) end
 end
--- Sorting is done by the server, so a new sort re-runs the current search (as Blizzard's headers do).
+-- Price and Name are sorted by the server, so a new sort re-runs the current search (as Blizzard's
+-- headers do). Level (the required level) is sorted here: with every result already loaded the
+-- rows are simply re-sorted, with no new query; otherwise the search is re-run, so the server's
+-- first loads lean the right way, and the rows are sorted as they are read (see AuctionData).
 SortBy = function(key)
     if Data.busy then return end
     local f = ns.AuctionFilters
     if f.sort == key then f.reverse = not f.reverse else f.sort, f.reverse = key, false end
     if tab == 1 and Data.mode == "browse" and #Data.rows > 0 then
-        if Data.Search(Data.query) then page = 1 end
+        if key == "Level" and not Data.more then
+            f.SortByLevel(Data.rows)
+            page = 1
+        elseif Data.Search(Data.query) then page = 1 end
     end
     Refresh()
 end
@@ -963,7 +1314,7 @@ ToggleFilters = function()
 end
 EditLevel = function(key)
     -- Entry starts at 0 (= any level); the first digit typed replaces it.
-    local buffer = ns.Input.NewBuffer(key == "minLevel" and "Minimum level" or "Maximum level", "0", function(text)
+    local buffer = ns.Input.NewBuffer(key == "minLevel" and "Minimum required level" or "Maximum required level", "0", function(text)
         local level = tonumber(text == "" and "0" or text)
         local f = ns.AuctionFilters
         if not level or level < 0 or level > 999 or level ~= math.floor(level) then ns.Print("Enter a whole level from 0 to 999.") return end
@@ -1012,6 +1363,7 @@ function Auction.Open()
     if not Data.backend then ns.Print("No supported auction query API was found on this client.") return end
     if not frame then Create() end
     if #categories == 0 then categories = ns.AuctionFilters.Categories() ns.AuctionFilters.Reset() end
+    if frame.model then frame.model.unitSet = nil end -- dress the model in your current gear
     opened = opened + 1
     closing, exiting = false, false
     frame:SetAlpha(1)

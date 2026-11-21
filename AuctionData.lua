@@ -111,15 +111,31 @@ end
 local function ModernRows()
     local api, rows = C_AuctionHouse, {}
     if Data.mode == "browse" then
+        -- Each result's required level: the Level column, its sort, and the level range filter
+        -- (see AuctionFilters.Query). With the range set, an item whose data is not loaded yet is
+        -- left out until it arrives (levelWaiting); without it, the item is listed with its level
+        -- blank (levelMissing). Either way the results are read again as the data arrives.
+        local filters = ns.AuctionFilters
+        local byLevel = filters.LevelActive()
+        Data.levelWaiting, Data.levelMissing = 0, 0
         for _, r in ipairs(api.GetBrowseResults() or {}) do
-            local info = api.GetItemKeyInfo(r.itemKey)
-            rows[#rows + 1] = { name = info and info.itemName or ("Item " .. r.itemKey.itemID),
+            local keep = true
+            local required = filters.RequiredLevel(r.itemKey.itemID)
+            if required == nil then
+                if byLevel then Data.levelWaiting = Data.levelWaiting + 1 keep = false
+                else Data.levelMissing = Data.levelMissing + 1 end
+            elseif byLevel then keep = filters.LevelMatches(required) end
+            local info = keep and api.GetItemKeyInfo(r.itemKey)
+            if keep then rows[#rows + 1] = { name = info and info.itemName or ("Item " .. r.itemKey.itemID),
                 itemKey = r.itemKey, link = info and (info.battlePetLink or info.appearanceLink),
                 itemID = r.itemKey.itemID, icon = info and info.iconFileID, quality = info and info.quality,
                 count = r.totalQuantity, price = r.minPrice, priceLabel = "From", summary = "Select to view listings.",
-                level = (r.itemKey.itemLevel or 0) > 0 and r.itemKey.itemLevel or nil }
+                required = required, level = required and required > 0 and required or nil,
+                itemLevel = (r.itemKey.itemLevel or 0) > 0 and r.itemKey.itemLevel or nil }
             rows[#rows].identity = table.concat({ r.itemKey.itemID, r.itemKey.itemLevel or 0, r.itemKey.itemSuffix or 0, r.itemKey.battlePetSpeciesID or 0 }, ":")
+            end
         end
+        if filters.sort == "Level" then filters.SortByLevel(rows) end
         Data.more = api.HasFullBrowseResults and not api.HasFullBrowseResults() or false
     elseif Data.mode == "details" and Data.itemKey then
         local key = Data.itemKey
@@ -183,6 +199,9 @@ function Data.Read()
     if ok then
         Data.rows = rows
         Data.message = #rows == 0 and "No results." or (#rows .. " results loaded")
+        if Data.mode == "browse" and (Data.levelWaiting or 0) > 0 then
+            Data.message = (#rows == 0 and "Checking" or (#rows .. " results loaded, checking")) .. " required levels..."
+        end
         if ns.AuctionTransactions and Data.mode == "details" then ns.AuctionTransactions.MarketUpdated(rows,Data.itemKey) end
     else
         Data.rows, Data.message = {}, "This client returned an unsupported auction result. Use the native window."
@@ -213,10 +232,26 @@ end
 local events = CreateFrame("Frame")
 for _, event in ipairs({ "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "AUCTION_ITEM_LIST_UPDATE", "AUCTION_OWNED_LIST_UPDATE",
     "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED", "AUCTION_HOUSE_BROWSE_RESULTS_ADDED", "ITEM_SEARCH_RESULTS_UPDATED", "ITEM_SEARCH_RESULTS_ADDED",
-    "COMMODITY_SEARCH_RESULTS_UPDATED", "COMMODITY_SEARCH_RESULTS_ADDED", "OWNED_AUCTIONS_UPDATED", "ITEM_KEY_ITEM_INFO_RECEIVED" }) do
+    "COMMODITY_SEARCH_RESULTS_UPDATED", "COMMODITY_SEARCH_RESULTS_ADDED", "OWNED_AUCTIONS_UPDATED", "ITEM_KEY_ITEM_INFO_RECEIVED",
+    "GET_ITEM_INFO_RECEIVED" }) do
     pcall(events.RegisterEvent, events, event)
 end
+-- Item data arriving for a required level: the browse results are read again once the burst
+-- settles (one item arrives per event, often dozens in a row).
+local levelReadPending = false
+local function LevelsPending() return (Data.levelWaiting or 0) + (Data.levelMissing or 0) > 0 end
+local function LevelDataArrived()
+    if levelReadPending or not LevelsPending() then return end
+    levelReadPending = true
+    C_Timer.After(0.25, function()
+        levelReadPending = false
+        if Data.active and not Data.busy and Data.mode == "browse" and Data.searched and LevelsPending() then
+            Data.Read()
+        end
+    end)
+end
 events:SetScript("OnEvent", function(_, event, key)
+    if event == "GET_ITEM_INFO_RECEIVED" then LevelDataArrived() return end
     if event == "AUCTION_HOUSE_SHOW" then
         Data.active, Data.backend = true, Data.Detect()
         Data.busy, Data.mode, Data.rows, Data.searched, Data.pending = false, "browse", {}, false, false

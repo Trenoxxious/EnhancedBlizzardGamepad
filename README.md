@@ -22,31 +22,43 @@ product folder Forever uses on your install), then `/reload`.
 | L2 (LT) | Shift. Press twice quickly for caps lock |
 | R2 (RT) or Options (Menu) | Send / submit (R2 sends on release; hold R2 + D-pad left/right to switch chat tabs) |
 | L1 / R1 (LB / RB) | Move text caret |
-| L3 (LS click) | Toggle symbols page |
+| L3 (LS click) | Toggle symbols page (the ?123 / ABC / Àé keys switch pages too; selection stays on the key pressed, and every typing page is the same size) |
 | R3 (RS click) | Delete previous word |
 | Share (View) | Cycle chat channel: Say, Instance, Party, Raid, Guild, Yell, Whisper (only those available) |
 | Circle (B) or Touchpad | Close keyboard and hand control back to the window behind it (text kept, except chat) |
 
 Mouse clicks on keys also work, which is the fallback in combat.
 
-## Options page
+## Settings window
 
-Esc > Options > AddOns > Enhanced Blizzard Gamepad (or `/ebg` with nothing after it, or
-`/ebg options`) holds the everyday settings: enable, automatic opening, gamepad-only, sounds,
+EBG's own window holds the everyday settings: enable, automatic opening, gamepad-only, sounds,
 layout, style, scale, background shade, left-stick selection, navigation pointer, the chat
 settings (close after Send, hide the chat input, chat copy, right-stick scroll, fade the chat
 window, group finder whisper), Blizzard's legend and prompts, and the auction house settings.
 Art overrides and diagnostics stay as slash commands.
 
-The page is a canvas drawn with Blizzard's own row templates, built once at login, not rows
-added to Blizzard's settings list: on Forever the list reuses its row frames across categories,
-and addon-made rows carried taint into other pages. Every control reads and writes through
-`Options.lua`'s proxy, so it shows the value the code actually uses (several settings are stored
-as "unset means on") and applies changes at once.
+Open it from:
+- the small gear in the keyboard's top right corner (click it, or D-pad up from the top row's
+  last key, Delete, then Cross/A; "Settings" shows beside the gear while it is selected),
+- the gear key beside "Close auction house" in the gamepad auction browser (left from Close),
+- `/ebg` with nothing after it, or `/ebg options`.
+
+In the window: D-pad up/down moves, left/right changes the value (left turns a toggle off,
+right turns it on), Cross (A) flips a toggle or steps a list, L1/R1 jump between sections, and
+Circle (B), Options (Menu) or Escape closes it. The line under the list explains the selected
+setting. The mouse works too (click a row; right-click steps a list backwards; wheel scrolls).
+
+The window holds the pad while it is open: the keyboard and the auction browser let go of it
+when it opens and take it back when it closes. It closes when combat starts, because pad capture
+cannot change in combat. It is deliberately not a page in Esc > Options > AddOns: those pages are
+not reachable with the D-pad, and on Forever the game's settings list carried taint from addon
+rows into other pages (the Social page had `IsUserOAuthed` blocked). Every control reads and
+writes through its setting's get/set in `Options.lua`, so it shows the value the code actually
+uses (several settings are stored as "unset means on") and applies changes at once.
 
 ## Slash commands
 
-`/ebg` or `/ebgamepad` (no command opens the options page; `help` lists the commands)
+`/ebg` or `/ebgamepad` (no command opens the settings window; `help` lists the commands)
 
 - `show`, `hide`, `toggle` (toggle with no field focused opens chat)
 - `auto on|off` auto popup on focus
@@ -135,16 +147,59 @@ Once a category is picked the list shows only its path and its subcategories; a 
 under the list steps up one level. Selecting a category does not query the auction house: it clears the old results and waits for
 Search, so several category steps cost one request instead of one each.
 Sorting is done from the results' column headers, as in Blizzard's window: press Price, Name, or
-(for gear) Level to sort by it, and again to reverse; the current search re-runs in the new order.
+(for gear) Req. Level to sort by it, and again to reverse; Price and Name re-run the current search
+in the new order (Req. Level is sorted here; see below).
 Filter opens a single page: the level range at the top, then checkboxes grouped as in Blizzard's
 filter menu (general options; rarities in their quality colours). The Filter button shows how many
 settings differ from the defaults. Apply and search submits these through the auction query API;
 no native search handler or category mixin is called. Any (zero) means no level limit.
 
+The level range is the level required to use the item ("Requires Level N"), not item level. The
+modern browse query's own level fields are matched against item level on Forever, so they are
+sent as "any" and `AuctionData` keeps only the browse results whose required level (from the
+item's data) falls in the range. An item whose data has not loaded yet is held back, the load is
+requested, and the results are read again as the data arrives (the status line says "checking
+required levels" meanwhile). Items with no level requirement count as level 0, so any minimum
+leaves them out. The legacy `QueryAuctionItems` takes the required level itself and still gets
+the range directly.
+
+The Level column ("Req. Level") is the required level too, and so is its sort. The server cannot
+sort by required level (its own Level sort is item level, and on Forever it does not reorder the
+results at all), so browse results are sorted by `AuctionFilters.SortByLevel` as they are read:
+highest required level first on the first press, lowest first on the second, cheapest first among
+equal levels, and items whose data has not loaded yet last (they move into place as it arrives).
+With every result already loaded, pressing the header just re-sorts them with no new query.
+Otherwise the search re-runs with the server's Level sort, so the first loads lean the right way,
+and rows that Next loads are sorted in with the others.
+
 Views: Buy (search, inspect, buy out or bid), Sell (auctionable bag items), Auctions (review and
 cancel your listings; sold auctions stay listed greyed out, with the time until their gold reaches
 the mailbox, and cannot be cancelled). Previous/Next are greyed out when there is no page in that
-direction. Modern item selection loads
+direction.
+
+When the focused item is equipment, the item(s) you wear in that slot are shown under its tooltip
+to compare, each headed "Equipped": both rings, both trinkets, both hands for a one-hand weapon,
+main and off hand for a two-hander. Each ends with "If you replace this item:" and the stat changes
+a swap would make, gains in green and losses in red (from `GetItemStats`; only stats with a display
+name). The stack of tooltips is scaled down together to fit the preview pane. These are EBG's own
+tooltips, filled with `SetInventoryItem`; Blizzard's shopping tooltips are not used.
+
+The preview pane can show the focused item on your character instead of its tooltip: press R3
+(right stick click) on any item that can be worn visibly, in Buy, Sell or Auctions. Your character
+model appears dressed in your current gear with that item tried on; moving to another item tries
+that one on instead, and R3 again returns to the tooltip (the middle mouse button on a row or on
+the model does the same, for testing with a mouse; it is not shown anywhere). The choice stays while the browser is
+open. Hold the right stick left or right to turn the model (or drag it with the mouse); the
+further it is pushed, the faster the turn. While the right stick can turn the model, an indicator
+sits at the bottom of the model: the right stick glyph between a left and a right arrow, the arrow
+on the side being turned toward lit gold. Items that cannot be shown on a character (rings,
+trinkets, potions...) keep their tooltip, and the legend offers R3 only when it applies. The model
+is EBG's own `DressUpModel`, dressed with `SetUnit`, `Dress` and `TryOn`; Blizzard's dressing room
+is never opened. The sticks are taken only while the model is on screen: the right stick (and the
+camera stick the game derives from it) stays with the model, so the camera does not swing, and the
+left stick is passed on, so it still moves you.
+
+Modern item selection loads
 individual auction/commodity rows. Native window closes the overlay without closing the auctioneer.
 A launcher button and `/ebg ah` reopen it.
 
@@ -201,6 +256,8 @@ the offline test suite; live secure-execution and visual checks remain required.
 | Triangle / Y | Search again / refresh current view |
 | L1 / R1 (LB / RB) | Change view |
 | L2 / R2 (LT / RT) | Previous / next results page |
+| R3 (right stick click) | Show the focused item on your character, or its tooltip again |
+| Right stick left/right | Turn the character model (while it is shown) |
 
 Requests respect server throttling and allow one pending query. Changing a query in another
 window invalidates the displayed results. Timeouts and API errors produce visible recovery
@@ -259,6 +316,12 @@ show that color on the text, unavailable ones are dimmed. Share steps through th
 tabs. On "Whisper" the input strip reads "Whisper to:"; type a name and press Send to set the
 target, then type the message. The input strip takes the active channel's color.
 
+The tabs update while the keyboard is open: joining or leaving a channel (including the zone
+channels swapped on a zone change), group and guild changes, and chat colour changes redraw
+them. Channel events come in bursts and the game's channel list can lag them, so the redraw
+waits 0.2s and runs once per burst. If you leave the channel you are typing in, chat falls back
+to Say instead of keeping a target that Send would fail on.
+
 ## Controller glyphs
 
 Confirmed on build 16001: Blizzard's icon frame is `InputIconTextureFrameTemplate` (mixin
@@ -273,6 +336,20 @@ against the atlas family the native `GamepadPersistentInputLegend` is drawing, a
 each button to the client's own atlases (`Gamepad-PS-ButtonCrox-Normal`, `Gamepad-PS-TriggerL1-Normal`
 and so on; the Cross typo is Blizzard's). Unknown names, such as Options/Share on PlayStation and
 the whole Xbox family until confirmed, are probed from candidate lists and fall back to text labels.
+
+When no controller is identified in gamepad mode (no active device, or a "Generic" label style), a
+PC defaults to PlayStation glyphs; a Mac keeps Xbox. Blizzard's legend is then not followed (it
+draws Blizzard's own default), and a native prompt or icon that draws another family's art than
+the expected atlas is refused, so EBG's PlayStation atlases are used throughout. `/ebg status`
+says where the glyph style came from (settings, the controller, or the default).
+
+Settings > Gamepad legend > Button glyphs (Automatic / PlayStation / Xbox) chooses the family
+outright. A PlayStation pad used through Steam Input or DS4Windows is usually reported to the game
+as an Xbox controller ("Letters"), so Automatic shows Xbox glyphs for it; choose PlayStation then.
+A chosen family is never overridden by Blizzard's legend, and Blizzard's prompts and icons that
+draw the other family's art (judged by the atlas name, e.g. `Gamepad-XB-...`, `gamepad-xb1-...`)
+are refused in favour of EBG's own atlases. Changing it redraws the keyboard, the legends, the
+auction browser's keys and this window at once.
 
 ## Skinning
 

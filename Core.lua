@@ -78,11 +78,34 @@ function ns.LabelStyle()
     return style, name
 end
 
--- Returns "letters" (Xbox) or "shapes" (PlayStation) so glyphs match the native UI.
-function ns.GlyphStyle()
+-- The family the controller itself reports: "shapes" (PlayStation), "letters" (Xbox, and the
+-- Nintendo-style "Reverse" layout), or nil when no controller is identified (no active device, or
+-- a "Generic" label style).
+function ns.DetectedGlyphStyle()
     local style = ns.LabelStyle()
-    if style and style:lower():find("shape") then return "shapes" end
-    return "letters"
+    style = style and style:lower() or ""
+    if style:find("shape") then return "shapes" end
+    if style:find("letter") or style:find("reverse") then return "letters" end
+    return nil
+end
+-- Returns "letters" (Xbox) or "shapes" (PlayStation) so glyphs match the controller. With no
+-- controller identified, a PC defaults to PlayStation glyphs (a Mac keeps Xbox, as before).
+-- The Button glyphs setting (ns.db.glyphStyle) overrides both.
+function ns.GlyphStyle()
+    local chosen = ns.db and ns.db.glyphStyle
+    if chosen == "shapes" or chosen == "letters" then return chosen end
+    local detected = ns.DetectedGlyphStyle()
+    if detected then return detected end
+    if IsMacClient and IsMacClient() then return "letters" end
+    return "shapes"
+end
+
+-- The Button glyphs setting changed: drop the cached glyph family and redraw every glyph shown.
+function ns.OnGlyphStyleChanged()
+    if ns.Glyphs and ns.Glyphs.Reset then ns.Glyphs.Reset() end
+    if ns.RebuildKeyboard then pcall(ns.RebuildKeyboard) end
+    if ns.OnPadStateChanged then pcall(ns.OnPadStateChanged) end
+    if ns.Auction and ns.Auction.RefreshGlyphs then pcall(ns.Auction.RefreshGlyphs) end
 end
 
 -- Events ---------------------------------------------------------------------
@@ -480,7 +503,8 @@ local function HandleSlash(msg)
             "Active device ID: " .. tostring(id),
             "Device name: " .. tostring(devName),
             "labelStyle: " .. tostring(style),
-            "GlyphStyle: " .. ns.GlyphStyle(),
+            "GlyphStyle: " .. ns.GlyphStyle() .. ((ns.db and ns.db.glyphStyle) and " (chosen in settings)" or
+                (ns.DetectedGlyphStyle() and " (reported by the controller)" or " (no controller identified: default)")),
             "IsGamepadActive(): " .. tostring(ns.IsGamepadActive()),
             "",
             "Focused edit box: " .. (box and (box:IsForbidden() and "forbidden" or (box:GetName() or "unnamed")) or "none"),

@@ -18,7 +18,8 @@ ns.AuctionFilters.category=chosen
 ns.AuctionFilters.minLevel=10 ns.AuctionFilters.maxLevel=20
 ns.AuctionFilters.selected[5]=true
 local query=ns.AuctionFilters.Query("axe")
-check(query.itemClassFilters[1].subClassID==0 and query.minLevel==10 and query.maxLevel==20,"category and levels enter query")
+check(query.itemClassFilters[1].subClassID==0 and query.minLevel==0 and query.maxLevel==0,"category enters query; level range is filtered by required level, not sent")
+check(ns.AuctionFilters.LevelActive() and ns.AuctionFilters.LevelMatches(15) and not ns.AuctionFilters.LevelMatches(9) and not ns.AuctionFilters.LevelMatches(21),"required level range matches inclusively")
 check(#query.filters==2 and query.sorts[1].sortOrder==0,"explicit and implicit filters with price sort")
 query.itemClassFilters[1].classID=88
 check(chosen.filters[1].classID==2,"query receives independent filter tables")
@@ -159,6 +160,59 @@ check(categoryButton.focusRing:IsShown() and categoryButton.active,"category foc
 rowButton:GetScript("OnEnter")(rowButton)
 check(categoryButton.active and not categoryButton.focusRing:IsShown(),"moving focus retains category selection without focus glow")
 check(rowButton.role=="row" and rowButton.focusRing:IsShown(),"result focus uses row styling")
+-- R3 shows the focused listing on a model of your character in place of its tooltip, and back.
+local af,model=ns.Auction.frame,ns.Auction.frame.model
+IsDressableItem=function() return true end
+model.SetUnit=function(self,u) self.unit=u end
+model.Dress=function() end
+model.TryOn=function(self,l) self.tried=l end
+model.SetFacing=function(self,r) self.faced=r end
+af.EnableGamePadStick=function(self,on) self.sticksOn=on end
+af:GetScript("OnGamePadButtonDown")(af,"PADRSTICK")
+af:GetScript("OnGamePadButtonUp")(af,"PADRSTICK")
+check(model:IsShown() and model.unit=="player" and model.tried=="item:1","R3 tries the focused listing on a model of your character")
+check(af.sticksOn and model.turnHint:IsShown(),"the right stick is taken and the turn indicator shown while the model is up")
+af:GetScript("OnGamePadStick")(af,"Right",1,0,1)
+model:GetScript("OnUpdate")(model,0.1)
+check(model.faced and model.faced>0 and model.turnHint.lit==1,"right stick turns the model and lights the arrow it turns toward")
+af:GetScript("OnGamePadStick")(af,"Right",0,0,0)
+model:GetScript("OnUpdate")(model,0.1)
+check(model.turnHint.lit==0,"releasing the stick stops turning")
+af:GetScript("OnGamePadButtonDown")(af,"PADRSTICK")
+af:GetScript("OnGamePadButtonUp")(af,"PADRSTICK")
+check(not model:IsShown() and not af.sticksOn,"R3 again returns to the tooltip and gives the sticks back")
+rowButton:GetScript("OnMouseUp")(rowButton,"MiddleButton")
+check(model:IsShown(),"middle-clicking a row shows it on your character, as R3 does")
+rowButton:GetScript("OnMouseUp")(rowButton,"MiddleButton")
+check(not model:IsShown(),"middle-clicking again returns to the tooltip")
+IsDressableItem=function() return false end
+af:GetScript("OnGamePadButtonDown")(af,"PADRSTICK")
+af:GetScript("OnGamePadButtonUp")(af,"PADRSTICK")
+check(not model:IsShown(),"an item that cannot be worn keeps its tooltip")
+IsDressableItem=nil
+-- An equipment tooltip gets the equipped item for its slot underneath, headed "Equipped".
+GetItemInfoInstant=function(id) return id,"Armor","Cloth","INVTYPE_HEAD",134400,4,1 end
+GetInventoryItemLink=function(_,slot) if slot==1 then return "|cffffffff|Hitem:7::::::::|h[Old Cowl]|h|r" end end
+for _,t in ipairs(af.compare) do t.SetInventoryItem=function() return true end end
+rowButton:GetScript("OnEnter")(rowButton)
+check(af.compare[1]:IsShown() and af.compare[1].heading:GetText()=="Equipped" and not af.compare[2]:IsShown(),"equipment tooltip shows the equipped item underneath to compare")
+GetItemInfoInstant,GetInventoryItemLink=nil,nil
+rowButton:GetScript("OnEnter")(rowButton)
+check(not af.compare[1]:IsShown(),"nothing to compare: no Equipped tooltip")
+ITEM_MOD_STAMINA_SHORT,ITEM_MOD_AGILITY_SHORT="Stamina","Agility"
+GetItemStats=function(l) if l=="new" then return {ITEM_MOD_STAMINA_SHORT=5,ITEM_MOD_AGILITY_SHORT=1} end return {ITEM_MOD_STAMINA_SHORT=2,ITEM_MOD_AGILITY_SHORT=3,ITEM_MOD_INTERNAL=9} end
+local diff=ns.Auction.StatDiff("new","old")
+check(#diff==2 and diff[1].name=="Stamina" and diff[1].delta==3 and diff[2].name=="Agility" and diff[2].delta==-2,"stat changes list gains first, then losses, named stats only")
+GetItemStats,ITEM_MOD_STAMINA_SHORT,ITEM_MOD_AGILITY_SHORT=nil,nil,nil
+-- The Level column is the required level, sorted here (the server cannot): highest first, unknown last.
+local sorted={{required=10,price=5,identity="a"},{required=nil,price=1,identity="b"},{required=30,price=9,identity="c"},{required=10,price=2,identity="d"}}
+ns.AuctionFilters.sort,ns.AuctionFilters.reverse="Level",false
+ns.AuctionFilters.SortByLevel(sorted)
+check(sorted[1].identity=="c" and sorted[2].identity=="d" and sorted[3].identity=="a" and sorted[4].identity=="b","Level sorts by required level, highest first, cheapest on ties, unknown last")
+ns.AuctionFilters.reverse=true
+ns.AuctionFilters.SortByLevel(sorted)
+check(sorted[1].identity=="d" and sorted[3].identity=="c" and sorted[4].identity=="b","Level reversed sorts lowest first")
+ns.AuctionFilters.sort,ns.AuctionFilters.reverse="Price",false
 ns.Auction.frame.tabButtons[2]:GetScript("OnClick")(ns.Auction.frame.tabButtons[2])
 check(not ns.Auction.frame.categoryButtons[1]:IsShown() and ns.Auction.frame.sidebarHelp:IsShown(),"bag lookup does not imply category filters apply")
 check(ns.Auction.frame.viewTitle:GetText()=="Sell an item","sell context is explicit")

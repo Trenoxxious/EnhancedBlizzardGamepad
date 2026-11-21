@@ -46,11 +46,20 @@ local TEXT = {
     PS = { PAD1 = "Cross", PAD2 = "Circle", PAD3 = "Square", PAD4 = "Tri", PADLSHOULDER = "L1", PADRSHOULDER = "R1", PADLTRIGGER = "L2", PADRTRIGGER = "R2", PADFORWARD = "Options", PADBACK = "Share", PADLSTICK = "L3", PADRSTICK = "R3", PADSOCIAL = "Touchpad" },
     XB = { PAD1 = "A", PAD2 = "B", PAD3 = "X", PAD4 = "Y", PADLSHOULDER = "LB", PADRSHOULDER = "RB", PADLTRIGGER = "LT", PADRTRIGGER = "RT", PADFORWARD = "Menu", PADBACK = "View", PADLSTICK = "LS", PADRSTICK = "RS", PADSOCIAL = "Share" },
 }
-local TEXT_COMMON = { PADDUP = "Up", PADDDOWN = "Down", PADDLEFT = "Left", PADDRIGHT = "Right", PADDPAD = "D-pad" }
+local TEXT_COMMON = { PADDUP = "Up", PADDDOWN = "Down", PADDLEFT = "Left", PADDRIGHT = "Right", PADDPAD = "D-pad", RSTICKMOVE = "Right stick" }
 
 local function AtlasExists(name)
     return C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(name) ~= nil
 end
+-- The controller family an atlas name belongs to ("PS" or "XB"), or nil when the name does not
+-- say (e.g. Gamepad-PS-ButtonCrox-Normal, gamepad-ps5-32x-..., Gamepad-XB-ButtonA-Normal, gamepad-xb1-...).
+local function FamilyOf(atlas)
+    local a = type(atlas) == "string" and atlas:lower() or ""
+    if a:find("%-ps%d?%-") or a:find("playstation") then return "PS" end
+    if a:find("%-xb") or a:find("xbox") then return "XB" end
+    return nil
+end
+Glyphs.FamilyOf = FamilyOf
 
 -- Reads the atlas family the native gamepad legend is currently drawing, e.g. "Gamepad-PS-".
 local function PrefixFromNativeLegend()
@@ -89,7 +98,11 @@ end
 -- Returns family ("PS" | "XB") and the atlas prefix in use.
 function Glyphs.Family()
     if cache.family then return cache.family, cache.prefix end
-    local prefix = PrefixFromNativeLegend()
+    -- Blizzard's legend is followed only for an identified controller; with none identified its
+    -- art is Blizzard's own default, and EBG's default (ns.GlyphStyle) applies instead.
+    -- A family chosen in the settings (Button glyphs) is never overridden by Blizzard's legend.
+    local chosen = ns.db and (ns.db.glyphStyle == "shapes" or ns.db.glyphStyle == "letters")
+    local prefix = not chosen and ns.DetectedGlyphStyle() and PrefixFromNativeLegend() or nil
     local family
     if prefix then
         family = prefix:find("PS") and "PS" or "XB"
@@ -285,19 +298,33 @@ function Glyphs.CreateNativeIcon(parent)
     return f
 end
 
--- Binds a native icon frame to a button; returns true on success.
+local FindDrawn
+-- Binds a native icon frame to a button; returns true on success. Like the native prompts
+-- (DrewExpected), an icon that draws another family's art than ours (Blizzard drawing Xbox glyphs
+-- while EBG defaults to PlayStation for an unidentified controller) is refused, so the caller
+-- falls back to EBG's own atlas.
 function Glyphs.BindNativeIcon(f, button)
     if not f or type(f.SetInputKey) ~= "function" then return false end
     local ok = pcall(f.SetInputKey, f, button)
     if ok and type(f.RefreshIconTextures) == "function" then pcall(f.RefreshIconTextures, f) end
     if ok and type(f.SetEnabled) == "function" then pcall(f.SetEnabled, f, true) end
+    if ok then
+        local expected = Glyphs.Atlas(button, "Normal")
+        local okDrawn, drawn = pcall(FindDrawn, f, 0)
+        if okDrawn and drawn and drawn.atlas then
+            if expected and drawn.atlas ~= expected then return false end
+            -- With no atlas of our own to compare, the art's family still has to match.
+            local family = FamilyOf(drawn.atlas)
+            if family and family ~= Glyphs.Family() then return false end
+        end
+    end
     return ok
 end
 
 -- What Blizzard's own icon frame draws for `button` ({atlas=...} or {file=...}), read from a hidden
 -- probe. Used for glyphs inside text when the atlas names cannot be guessed on this client.
 local probe = nil
-local function FindDrawn(f, depth)
+function FindDrawn(f, depth)
     if depth > 3 or not f then return nil end
     for _, r in ipairs({ f:GetRegions() }) do
         if r.GetObjectType and r:GetObjectType() == "Texture" then
@@ -513,6 +540,9 @@ local function DrewExpected(f, button)
     local drawn = tex and tex.GetAtlas and tex:GetAtlas()
     local expected = Glyphs.Atlas(button, "Normal")
     if drawn and expected then return drawn == expected end
+    -- With no atlas of our own to compare, the art's family still has to match ours.
+    local family = FamilyOf(drawn)
+    if family and family ~= Glyphs.Family() then return false end
     return true
 end
 
