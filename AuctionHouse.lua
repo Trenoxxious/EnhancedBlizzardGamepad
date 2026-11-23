@@ -1148,11 +1148,11 @@ Refresh = function()
     frame.emptyTitle:SetShown(#rows == 0 and not filterMode)
     frame.emptyHelp:SetShown(#rows == 0 and not filterMode)
     frame.emptyTitle:SetText(Data.busy and "Searching auctions..." or (Data.mode == "invalid" and tab == 1 and "Search unavailable" or
-        (Data.message == "No results." and tab == 1 and "No auctions found" or (Data.pending and tab == 1 and "Ready to search" or "Start browsing"))))
+        (Data.message == "No results." and tab == 1 and "No auctions found" or (Data.pending and tab == 1 and "Ready to search" or ""))))
     frame.emptyHelp:SetText(tab == 2 and "Unlocked, auctionable items in your bags will appear here." or
         (tab == 3 and "No auctions to display." or (Data.busy and "Results will appear here when the auction house responds." or
         (Data.mode == "invalid" and Data.message or (Data.pending and ("Press Search to list auctions in " .. Escape(CategoryPath()) .. ".") or
-        "Choose a category on the left, or enter an item name above.")))))
+        "")))))
     frame.quantityHeader:SetText(tab == 2 and "Carried" or
         (tab == 3 and "Listed" or (Data.backend == "legacy" and "Stack" or "Available")))
     -- Plain labels where the list cannot be re-sorted; the sort headers replace them otherwise.
